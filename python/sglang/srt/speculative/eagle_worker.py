@@ -289,9 +289,12 @@ class EAGLEWorker(TpModelWorker):
             the batch id (used for overlap schedule), and number of accepted tokens.
         """
         if batch.forward_mode.is_extend() or batch.is_extend_in_batch:
-            logits_output, next_token_ids, seq_lens_cpu = self.forward_target_extend(
-                batch
-            )
+            (
+                logits_output,
+                next_token_ids,
+                seq_lens_cpu,
+                can_run_cuda_graph,
+            ) = self.forward_target_extend(batch)
             with self.draft_tp_context(
                 self.draft_model_runner.tp_group
             ), speculative_moe_backend_context(), speculative_moe_a2a_backend_context():
@@ -306,7 +309,7 @@ class EAGLEWorker(TpModelWorker):
                 logits_output=logits_output,
                 next_token_ids=next_token_ids,
                 num_accepted_tokens=0,
-                can_run_cuda_graph=False,
+                can_run_cuda_graph=can_run_cuda_graph,
             )
         else:
             with self.draft_tp_context(
@@ -357,7 +360,7 @@ class EAGLEWorker(TpModelWorker):
 
     def forward_target_extend(
         self, batch: ScheduleBatch
-    ) -> Tuple[LogitsProcessorOutput, torch.Tensor, int, Optional[torch.Tensor]]:
+    ) -> Tuple[LogitsProcessorOutput, torch.Tensor, int, bool]:
         """Run the target extend.
 
         Args:
@@ -380,6 +383,7 @@ class EAGLEWorker(TpModelWorker):
             logits_output,
             next_token_ids,
             model_worker_batch.seq_lens_cpu,
+            batch_result.can_run_cuda_graph,
         )
 
     def _draft_preprocess_decode(self, batch: ScheduleBatch):
