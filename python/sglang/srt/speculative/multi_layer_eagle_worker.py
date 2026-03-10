@@ -315,7 +315,7 @@ class MultiLayerEagleWorker(TpModelWorker):
 
     def forward_target_extend(
         self, batch: ScheduleBatch
-    ) -> Tuple[LogitsProcessorOutput, torch.Tensor, int, bool]:
+    ) -> Tuple[LogitsProcessorOutput, torch.Tensor, Optional[torch.Tensor], bool]:
         """Run the target extend.
 
         Args:
