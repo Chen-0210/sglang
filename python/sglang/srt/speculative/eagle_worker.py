@@ -369,6 +369,8 @@ class EAGLEWorker(TpModelWorker):
         Returns:
             logits_output: The output of logits. It will contain the full hidden states.
             next_token_ids: Next token ids generated.
+            seq_lens_cpu: CPU copy of sequence lengths for the draft prefill path.
+            can_run_cuda_graph: Whether the target prefill ran with cuda graph.
         """
         # Forward with the target model and get hidden states.
         # We need the full hidden states to prefill the KV cache of the draft model.
