@@ -386,6 +386,10 @@ class EAGLEDraftCudaGraphRunner:
             forward_batch.out_cache_loc
         )
         buffers.positions[:raw_num_token].copy_(forward_batch.positions)
+        if forward_batch.mrope_positions is not None:
+            buffers.mrope_positions[:, :raw_num_token].copy_(
+                forward_batch.mrope_positions
+            )
         buffers.topk_p[:raw_bs].copy_(forward_batch.spec_info.topk_p)
         buffers.topk_index[:raw_bs].copy_(forward_batch.spec_info.topk_index)
         buffers.hidden_states[:raw_bs].copy_(forward_batch.spec_info.hidden_states)

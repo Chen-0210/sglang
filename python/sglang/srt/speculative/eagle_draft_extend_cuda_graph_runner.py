@@ -449,6 +449,10 @@ class EAGLEDraftExtendCudaGraphRunner:
             buffers.extend_seq_lens[:raw_bs].fill_(self.num_tokens_per_bs)
         buffers.out_cache_loc[:num_tokens].copy_(forward_batch.out_cache_loc)
         buffers.positions[:num_tokens].copy_(forward_batch.positions)
+        if forward_batch.mrope_positions is not None:
+            buffers.mrope_positions[:, :num_tokens].copy_(
+                forward_batch.mrope_positions
+            )
         if (
             forward_batch.spec_info.hidden_states.shape[1]
             == buffers.hidden_states.shape[1]
