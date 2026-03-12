@@ -15,9 +15,9 @@ INVALID = -9999999
 
 
 def get_one_example(lines, i, include_answer):
-    ret = "Question: " + lines[i]["question"] + "\nAnswer:"
+    ret = "Question: " + lines[i]["question"] + "\nAnswer: "
     if include_answer:
-        ret += " " + lines[i]["answer"]
+        ret += lines[i]["answer"]
     return ret
 
 

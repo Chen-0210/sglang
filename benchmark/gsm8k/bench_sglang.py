@@ -20,9 +20,9 @@ INVALID = -9999999
 
 
 def get_one_example(lines, i, include_answer):
-    ret = "Question: " + lines[i]["question"] + "\nAnswer:"
+    ret = "Question: " + lines[i]["question"] + "\nAnswer: "
     if include_answer:
-        ret += " " + lines[i]["answer"]
+        ret += lines[i]["answer"]
     return ret
 
 
@@ -108,7 +108,7 @@ def main(args):
         s += sgl.gen(
             "answer",
             max_tokens=args.max_new_tokens,
-            stop=["Question", "Assistant:", "<|separator|>"],
+            stop=["\nQuestion:", "\nAssistant:", "<|separator|>"],
         )
 
     #####################################

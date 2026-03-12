@@ -17,9 +17,9 @@ INVALID = -9999999
 
 
 def get_one_example(lines, i, include_answer):
-    ret = "Question: " + lines[i]["question"] + "\nAnswer:"
+    ret = "Question: " + lines[i]["question"] + "\nAnswer: "
     if include_answer:
-        ret += " " + lines[i]["answer"]
+        ret += lines[i]["answer"]
     return ret
 
 
@@ -79,7 +79,7 @@ def main(args):
                 prompt=few_shot_examples + questions[i],
                 temperature=0,
                 max_tokens=256,
-                stop=["Question", "Assistant:", "<|separator|>"],
+                stop=["\nQuestion:", "\nAssistant:", "<|separator|>"],
             )
             states[i] = answer
 
@@ -107,7 +107,7 @@ def main(args):
                             few_shot_examples + q,
                             temperature=0,
                             max_tokens=256,
-                            stop="Question",
+                            stop="\nQuestion:",
                         )
                     )
                 rets = await asyncio.gather(*tasks)

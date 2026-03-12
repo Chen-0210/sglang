@@ -555,6 +555,8 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             ret.extend_prefix_lens_cpu = batch.extend_prefix_lens
             ret.extend_seq_lens_cpu = batch.extend_seq_lens
             ret.extend_logprob_start_lens_cpu = batch.extend_logprob_start_lens
+            if batch.forward_mode.is_draft_extend(include_v2=True):
+                ret.spec_info.positions = ret.positions
 
         if model_runner.use_ngram_embedding:
             ret._init_ngram_embedding_info(batch, model_runner, device)
@@ -673,14 +675,14 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
         device = model_runner.device
         mm_inputs = batch.multimodal_inputs
 
-        if batch.forward_mode.is_draft_extend():  # draft_extend_after_decode
+        if batch.forward_mode.is_draft_extend(include_v2=True):  # draft_extend_after_decode
             mrope_deltas = []
             extend_lens = []
             for batch_idx in range(batch_size):
                 extend_seq_len = batch.extend_seq_lens[batch_idx]
                 extend_lens.append(extend_seq_len)
                 mrope_delta = (
-                    torch.zeros(1, dtype=torch.int64)
+                    torch.zeros(1, dtype=torch.int64, device=device)
                     if mm_inputs[batch_idx] is None
                     else mm_inputs[batch_idx].mrope_position_delta.squeeze(0)
                 )
@@ -698,7 +700,7 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             seq_positions = batch.spec_info.positions.view(batch_size, -1)
             mrope_deltas = [
                 (
-                    torch.tensor([0], dtype=torch.int64)
+                    torch.zeros(1, dtype=torch.int64, device=device)
                     if mm_inputs[i] is None
                     else mm_inputs[i].mrope_position_delta.squeeze(0)
                 )

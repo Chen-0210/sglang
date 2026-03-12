@@ -189,6 +189,10 @@ class EagleDraftInputV2Mixin:
         extend_num_tokens = len(batch.seq_lens) * num_draft_tokens
 
         batch.spec_info = self
+        # `self.positions` is populated in `prepare_for_v2_draft()` with decode-style
+        # positions (`seq_lens.repeat_interleave(topk)`). DRAFT_EXTEND_V2 needs fresh
+        # extend positions, so clear the stale value before building the forward batch.
+        self.positions = None
         batch.input_ids = predict
         batch.seq_lens = batch.seq_lens + num_draft_tokens
         batch.seq_lens_cpu = batch.seq_lens_cpu + num_draft_tokens
