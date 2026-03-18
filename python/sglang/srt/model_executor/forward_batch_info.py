@@ -736,6 +736,13 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
     ) -> None:
         assert batch.multimodal_inputs is not None
         batch_size = len(batch.multimodal_inputs)
+        if all(mm_input is None for mm_input in batch.multimodal_inputs):
+            with _nvtx_range("forward_batch.prepare_spec_mrope_deltas.all_none"):
+                self.spec_mrope_deltas = torch.zeros(
+                    (batch_size, 1), dtype=torch.int64, device=device
+                )
+            return
+
         mrope_deltas = []
         for i in range(batch_size):
             if batch.multimodal_inputs[i] is None:
