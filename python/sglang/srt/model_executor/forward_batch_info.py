@@ -736,17 +736,20 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
     ) -> None:
         assert batch.multimodal_inputs is not None
         batch_size = len(batch.multimodal_inputs)
-        mrope_deltas = [
-            (
-                torch.tensor([0], dtype=torch.int64, device=device)
-                if batch.multimodal_inputs[i] is None
-                else batch.multimodal_inputs[i]
-                .mrope_position_delta.squeeze(0)
-                .to(device=device)
+        mrope_deltas = []
+        for i in range(batch_size):
+            if batch.multimodal_inputs[i] is None:
+                with _nvtx_range("forward_batch.prepare_spec_mrope_deltas.none"):
+                    mrope_deltas.append(torch.zeros(1, dtype=torch.int64))
+            else:
+                with _nvtx_range("forward_batch.prepare_spec_mrope_deltas.mm"):
+                    mrope_deltas.append(
+                        batch.multimodal_inputs[i].mrope_position_delta.squeeze(0)
+                    )
+        with _nvtx_range("forward_batch.prepare_spec_mrope_deltas.stack_to"):
+            self.spec_mrope_deltas = torch.stack(mrope_deltas, dim=0).to(
+                device=device
             )
-            for i in range(batch_size)
-        ]
-        self.spec_mrope_deltas = torch.stack(mrope_deltas, dim=0)
 
     def _expand_mrope_from_input(
         self,
