@@ -362,7 +362,6 @@ class MultimodalInputs:
     # QWen2-VL related
     mrope_positions: Optional[torch.Tensor] = None
     mrope_position_delta: Optional[torch.Tensor] = None
-    mrope_position_delta_device_cache: Optional[torch.Tensor] = None
     mrope_position_delta_repeated_cache: Optional[torch.Tensor] = None
 
     @staticmethod
@@ -475,7 +474,6 @@ class MultimodalInputs:
                 self.mrope_position_delta = torch.cat(
                     [self.mrope_position_delta, other.mrope_position_delta], dim=0
                 )
-            self.mrope_position_delta_device_cache = None
 
         for key, val in other.__dict__.items():
             if "_id" in key:
