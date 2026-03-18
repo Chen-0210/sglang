@@ -29,6 +29,7 @@ ScheduleBatch -> ModelWorkerBatch -> ForwardBatch
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import IntEnum, auto
 from functools import total_ordering
@@ -69,6 +70,22 @@ if TYPE_CHECKING:
     from sglang.srt.speculative.spec_info import SpecInput, SpeculativeAlgorithm
 
 _is_npu = is_npu()
+
+try:
+    import torch.cuda.nvtx as cuda_nvtx
+except Exception:
+    cuda_nvtx = None
+
+
+@contextmanager
+def _nvtx_range(name: str):
+    if cuda_nvtx is not None:
+        cuda_nvtx.range_push(name)
+    try:
+        yield
+    finally:
+        if cuda_nvtx is not None:
+            cuda_nvtx.range_pop()
 
 
 class ForwardMode(IntEnum):
@@ -472,14 +489,18 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
         device = model_runner.device
 
         if batch.extend_input_logprob_token_ids is not None:
-            ret.extend_input_logprob_token_ids_gpu = (
-                batch.extend_input_logprob_token_ids.to(device, non_blocking=True)
-            )
+            with _nvtx_range(
+                "forward_batch.init_new.extend_input_logprob_token_ids_to"
+            ):
+                ret.extend_input_logprob_token_ids_gpu = (
+                    batch.extend_input_logprob_token_ids.to(device, non_blocking=True)
+                )
 
         if enable_num_token_non_padded(model_runner.server_args):
-            ret.num_token_non_padded = torch.tensor(
-                len(batch.input_ids), dtype=torch.int32
-            ).to(device, non_blocking=True)
+            with _nvtx_range("forward_batch.init_new.num_token_non_padded_to"):
+                ret.num_token_non_padded = torch.tensor(
+                    len(batch.input_ids), dtype=torch.int32
+                ).to(device, non_blocking=True)
         ret.num_token_non_padded_cpu = len(batch.input_ids)
 
         # For MLP sync
@@ -498,14 +519,18 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
 
             ret.original_global_num_tokens_cpu = batch.global_num_tokens
             ret.global_num_tokens_cpu = global_num_tokens
-            ret.global_num_tokens_gpu = torch.tensor(
-                global_num_tokens, dtype=torch.int64
-            ).to(device, non_blocking=True)
+            with _nvtx_range("forward_batch.init_new.global_num_tokens_to"):
+                ret.global_num_tokens_gpu = torch.tensor(
+                    global_num_tokens, dtype=torch.int64
+                ).to(device, non_blocking=True)
 
             ret.global_num_tokens_for_logprob_cpu = global_num_tokens_for_logprob
-            ret.global_num_tokens_for_logprob_gpu = torch.tensor(
-                global_num_tokens_for_logprob, dtype=torch.int64
-            ).to(device, non_blocking=True)
+            with _nvtx_range(
+                "forward_batch.init_new.global_num_tokens_for_logprob_to"
+            ):
+                ret.global_num_tokens_for_logprob_gpu = torch.tensor(
+                    global_num_tokens_for_logprob, dtype=torch.int64
+                ).to(device, non_blocking=True)
 
         if ret.forward_mode.is_idle():
             ret.positions = torch.empty((0,), dtype=torch.int64, device=device)
@@ -516,14 +541,15 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             block_size = batch.dllm_config.block_size
             # Use int64 for AMD rotary embedding kernel compatibility
             positions_dtype = torch.int64 if is_hip() or _is_npu else torch.int32
-            ret.positions = torch.tensor(
-                [
-                    i
-                    for block_offset in batch.dllm_block_offsets
-                    for i in range(block_offset, block_offset + block_size)
-                ],
-                dtype=positions_dtype,
-            ).to(device, non_blocking=True)
+            with _nvtx_range("forward_batch.init_new.dllm_positions_to"):
+                ret.positions = torch.tensor(
+                    [
+                        i
+                        for block_offset in batch.dllm_block_offsets
+                        for i in range(block_offset, block_offset + block_size)
+                    ],
+                    dtype=positions_dtype,
+                ).to(device, non_blocking=True)
         elif (
             ret.spec_info is not None
             and getattr(ret.spec_info, "positions", None) is not None
@@ -533,16 +559,19 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
         # Init position information
         if ret.forward_mode.is_decode() or ret.forward_mode.is_target_verify():
             if ret.positions is None:
-                ret.positions = clamp_position(batch.seq_lens)
+                with _nvtx_range("forward_batch.init_new.clamp_position"):
+                    ret.positions = clamp_position(batch.seq_lens)
         else:
             assert isinstance(batch.extend_seq_lens, list)
             assert isinstance(batch.extend_prefix_lens, list)
-            ret.extend_seq_lens = torch.tensor(
-                batch.extend_seq_lens, dtype=torch.int32
-            ).to(device, non_blocking=True)
-            ret.extend_prefix_lens = torch.tensor(
-                batch.extend_prefix_lens, dtype=torch.int32
-            ).to(device, non_blocking=True)
+            with _nvtx_range("forward_batch.init_new.extend_seq_lens_to"):
+                ret.extend_seq_lens = torch.tensor(
+                    batch.extend_seq_lens, dtype=torch.int32
+                ).to(device, non_blocking=True)
+            with _nvtx_range("forward_batch.init_new.extend_prefix_lens_to"):
+                ret.extend_prefix_lens = torch.tensor(
+                    batch.extend_prefix_lens, dtype=torch.int32
+                ).to(device, non_blocking=True)
             ret.extend_num_tokens = batch.extend_num_tokens
             positions, ret.extend_start_loc = compute_position(
                 model_runner.server_args.attention_backend,
@@ -557,16 +586,19 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             ret.extend_logprob_start_lens_cpu = batch.extend_logprob_start_lens
 
         if model_runner.use_ngram_embedding:
-            ret._init_ngram_embedding_info(batch, model_runner, device)
+            with _nvtx_range("forward_batch.init_new.init_ngram_embedding_info"):
+                ret._init_ngram_embedding_info(batch, model_runner, device)
 
         if model_runner.model_is_mrope:
             if (
                 ret.spec_info is not None
                 and getattr(ret.spec_info, "positions", None) is not None
             ):
-                ret._compute_spec_mrope_positions(model_runner, batch)
+                with _nvtx_range("forward_batch.init_new.compute_spec_mrope_positions"):
+                    ret._compute_spec_mrope_positions(model_runner, batch)
             else:
-                ret._compute_mrope_positions(model_runner, batch)
+                with _nvtx_range("forward_batch.init_new.compute_mrope_positions"):
+                    ret._compute_mrope_positions(model_runner, batch)
 
         # Init lora information
         if model_runner.server_args.enable_lora:

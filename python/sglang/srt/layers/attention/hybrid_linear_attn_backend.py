@@ -1,4 +1,5 @@
 import logging
+from contextlib import contextmanager
 from typing import Optional, Union
 
 import torch
@@ -30,6 +31,22 @@ if not is_cpu():
     )
 
 logger = logging.getLogger(__name__)
+
+try:
+    import torch.cuda.nvtx as cuda_nvtx
+except Exception:
+    cuda_nvtx = None
+
+
+@contextmanager
+def _nvtx_range(name: str):
+    if cuda_nvtx is not None:
+        cuda_nvtx.range_push(name)
+    try:
+        yield
+    finally:
+        if cuda_nvtx is not None:
+            cuda_nvtx.range_pop()
 
 
 # Kernel to track mamba states if needed based on track mask
@@ -231,7 +248,8 @@ class MambaAttnBackendBase(AttentionBackend):
         )
 
     def init_forward_metadata(self, forward_batch: ForwardBatch):
-        self.forward_metadata = self._forward_metadata(forward_batch)
+        with _nvtx_range("hybrid_linear_attn.mamba_base.init_forward_metadata"):
+            self.forward_metadata = self._forward_metadata(forward_batch)
 
     def _init_track_conv_indices(
         self, query_start_loc: torch.Tensor, forward_batch: ForwardBatch
@@ -380,9 +398,12 @@ class MambaAttnBackendBase(AttentionBackend):
         spec_info: Optional[Union[EagleDraftInput, EagleVerifyInput]],
         seq_lens_cpu: Optional[torch.Tensor],
     ):
-        self.forward_metadata = self._replay_metadata(
-            bs, req_pool_indices, forward_mode, spec_info, seq_lens_cpu
-        )
+        with _nvtx_range(
+            "hybrid_linear_attn.mamba_base.init_forward_metadata_replay_cuda_graph"
+        ):
+            self.forward_metadata = self._replay_metadata(
+                bs, req_pool_indices, forward_mode, spec_info, seq_lens_cpu
+            )
 
     def init_forward_metadata_capture_cpu_graph(
         self,
@@ -639,12 +660,14 @@ class Mamba2AttnBackend(MambaAttnBackendBase):
         self.mamba_chunk_size = config.mamba_chunk_size
 
     def init_forward_metadata(self, forward_batch: ForwardBatch):
-        metadata = self._forward_metadata(forward_batch)
-        self.forward_metadata = Mamba2Metadata.prepare_mixed(
-            metadata,
-            self.mamba_chunk_size,
-            forward_batch,
-        )
+        with _nvtx_range("hybrid_linear_attn.mamba2.forward_metadata"):
+            metadata = self._forward_metadata(forward_batch)
+        with _nvtx_range("hybrid_linear_attn.mamba2.prepare_mixed"):
+            self.forward_metadata = Mamba2Metadata.prepare_mixed(
+                metadata,
+                self.mamba_chunk_size,
+                forward_batch,
+            )
 
     def init_forward_metadata_capture_cuda_graph(
         self,
@@ -676,16 +699,18 @@ class Mamba2AttnBackend(MambaAttnBackendBase):
         spec_info: Optional[Union[EagleDraftInput, EagleVerifyInput]],
         seq_lens_cpu: Optional[torch.Tensor],
     ):
-        metadata = self._replay_metadata(
-            bs, req_pool_indices, forward_mode, spec_info, seq_lens_cpu
-        )
+        with _nvtx_range("hybrid_linear_attn.mamba2.replay_metadata"):
+            metadata = self._replay_metadata(
+                bs, req_pool_indices, forward_mode, spec_info, seq_lens_cpu
+            )
         draft_token_num = spec_info.draft_token_num if spec_info is not None else 1
-        self.forward_metadata = Mamba2Metadata.prepare_decode(
-            metadata,
-            seq_lens,
-            is_target_verify=forward_mode.is_target_verify(),
-            draft_token_num=draft_token_num,
-        )
+        with _nvtx_range("hybrid_linear_attn.mamba2.prepare_decode"):
+            self.forward_metadata = Mamba2Metadata.prepare_decode(
+                metadata,
+                seq_lens,
+                is_target_verify=forward_mode.is_target_verify(),
+                draft_token_num=draft_token_num,
+            )
 
     def forward(
         self,
@@ -733,8 +758,12 @@ class HybridLinearAttnBackend(AttentionBackend):
         self.attn_backend_list = [full_attn_backend, linear_attn_backend]
 
     def init_forward_metadata(self, forward_batch: ForwardBatch):
-        for attn_backend in self.attn_backend_list:
-            attn_backend.init_forward_metadata(forward_batch)
+        with _nvtx_range("hybrid_linear_attn.wrapper.full_attn.init_forward_metadata"):
+            self.full_attn_backend.init_forward_metadata(forward_batch)
+        with _nvtx_range(
+            "hybrid_linear_attn.wrapper.linear_attn.init_forward_metadata"
+        ):
+            self.linear_attn_backend.init_forward_metadata(forward_batch)
 
     def init_cuda_graph_state(self, max_bs: int, max_num_tokens: int):
         for attn_backend in self.attn_backend_list:
@@ -797,8 +826,23 @@ class HybridLinearAttnBackend(AttentionBackend):
         spec_info: Optional[SpecInput],
         seq_lens_cpu: Optional[torch.Tensor],
     ):
-        for attn_backend in self.attn_backend_list:
-            attn_backend.init_forward_metadata_replay_cuda_graph(
+        with _nvtx_range(
+            "hybrid_linear_attn.wrapper.full_attn.init_forward_metadata_replay_cuda_graph"
+        ):
+            self.full_attn_backend.init_forward_metadata_replay_cuda_graph(
+                bs,
+                req_pool_indices,
+                seq_lens,
+                seq_lens_sum,
+                encoder_lens,
+                forward_mode,
+                spec_info,
+                seq_lens_cpu,
+            )
+        with _nvtx_range(
+            "hybrid_linear_attn.wrapper.linear_attn.init_forward_metadata_replay_cuda_graph"
+        ):
+            self.linear_attn_backend.init_forward_metadata_replay_cuda_graph(
                 bs,
                 req_pool_indices,
                 seq_lens,

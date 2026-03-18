@@ -93,6 +93,22 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from sglang.srt.model_executor.model_runner import ModelRunner
 
+try:
+    import torch.cuda.nvtx as cuda_nvtx
+except Exception:
+    cuda_nvtx = None
+
+
+@contextmanager
+def _nvtx_range(name: str):
+    if cuda_nvtx is not None:
+        cuda_nvtx.range_push(name)
+    try:
+        yield
+    finally:
+        if cuda_nvtx is not None:
+            cuda_nvtx.range_pop()
+
 
 def _grouped_foreach_copy_(dsts: List[torch.Tensor], srcs: List[torch.Tensor]) -> None:
     """Call torch._foreach_copy_ grouped by (dst_dtype, src_dtype) pairs."""
@@ -1045,7 +1061,8 @@ class CudaGraphRunner:
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
     ):
         buffers = self.buffers
-        self.recapture_if_needed(forward_batch)
+        with _nvtx_range("cuda_graph_runner.replay_prepare.recapture_if_needed"):
+            self.recapture_if_needed(forward_batch)
 
         raw_bs = forward_batch.batch_size
         raw_num_token = raw_bs * self.num_tokens_per_bs
@@ -1064,27 +1081,29 @@ class CudaGraphRunner:
             index = bisect.bisect_left(self.capture_bs, raw_bs)
         bs = self.capture_bs[index]
 
-        buffers.populate_from_forward_batch(
-            forward_batch=forward_batch,
-            raw_bs=raw_bs,
-            raw_num_token=raw_num_token,
-            bs=bs,
-            seq_len_fill_value=self.seq_len_fill_value,
-            require_gathered_buffer=self.require_gathered_buffer,
-            num_tokens_per_bs=self.num_tokens_per_bs,
-            nsa_enable_prefill_cp=self.nsa_enable_prefill_cp,
-            enable_num_token_non_padded_flag=enable_num_token_non_padded(
-                self.model_runner.server_args
-            ),
-            pp_proxy_tensors=pp_proxy_tensors,
-        )
-        if self.enable_two_batch_overlap:
-            self.tbo_plugin.replay_prepare(
-                forward_mode=self.capture_forward_mode,
+        with _nvtx_range("cuda_graph_runner.replay_prepare.populate_from_forward_batch"):
+            buffers.populate_from_forward_batch(
+                forward_batch=forward_batch,
+                raw_bs=raw_bs,
+                raw_num_token=raw_num_token,
                 bs=bs,
-                num_token_non_padded=len(forward_batch.input_ids),
-                spec_info=forward_batch.spec_info,
+                seq_len_fill_value=self.seq_len_fill_value,
+                require_gathered_buffer=self.require_gathered_buffer,
+                num_tokens_per_bs=self.num_tokens_per_bs,
+                nsa_enable_prefill_cp=self.nsa_enable_prefill_cp,
+                enable_num_token_non_padded_flag=enable_num_token_non_padded(
+                    self.model_runner.server_args
+                ),
+                pp_proxy_tensors=pp_proxy_tensors,
             )
+        if self.enable_two_batch_overlap:
+            with _nvtx_range("cuda_graph_runner.replay_prepare.tbo_plugin"):
+                self.tbo_plugin.replay_prepare(
+                    forward_mode=self.capture_forward_mode,
+                    bs=bs,
+                    num_token_non_padded=len(forward_batch.input_ids),
+                    spec_info=forward_batch.spec_info,
+                )
         if forward_batch.forward_mode.is_idle() and forward_batch.spec_info is not None:
             forward_batch.spec_info.custom_mask = buffers.custom_mask
         # Attention backend
@@ -1093,16 +1112,19 @@ class CudaGraphRunner:
             attn_backend = self.model_runner.decode_attn_backend_group[stream_idx]
         else:
             attn_backend = self.model_runner.attn_backend
-        attn_backend.init_forward_metadata_replay_cuda_graph(
-            bs,
-            buffers.req_pool_indices[:bs],
-            buffers.seq_lens[:bs],
-            forward_batch.seq_lens_sum + (bs - raw_bs) * self.seq_len_fill_value,
-            buffers.encoder_lens[:bs] if self.is_encoder_decoder else None,
-            self.capture_forward_mode,
-            forward_batch.spec_info,
-            seq_lens_cpu=buffers.seq_lens_cpu[:bs],
-        )
+        with _nvtx_range(
+            "cuda_graph_runner.replay_prepare.attn_backend.init_forward_metadata_replay_cuda_graph"
+        ):
+            attn_backend.init_forward_metadata_replay_cuda_graph(
+                bs,
+                buffers.req_pool_indices[:bs],
+                buffers.seq_lens[:bs],
+                forward_batch.seq_lens_sum + (bs - raw_bs) * self.seq_len_fill_value,
+                buffers.encoder_lens[:bs] if self.is_encoder_decoder else None,
+                self.capture_forward_mode,
+                forward_batch.spec_info,
+                seq_lens_cpu=buffers.seq_lens_cpu[:bs],
+            )
 
         # Store fields
         self.raw_bs = raw_bs

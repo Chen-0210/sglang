@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -48,6 +49,22 @@ if is_cuda():
         top_p_renorm_prob,
         tree_speculative_sampling_target_only,
     )
+
+try:
+    import torch.cuda.nvtx as cuda_nvtx
+except Exception:
+    cuda_nvtx = None
+
+
+@contextmanager
+def _nvtx_range(name: str):
+    if cuda_nvtx is not None:
+        cuda_nvtx.range_push(name)
+    try:
+        yield
+    finally:
+        if cuda_nvtx is not None:
+            cuda_nvtx.range_pop()
 
 
 @triton.jit
@@ -222,24 +239,26 @@ class EagleVerifyInputV2Mixin:
             bs = len(batch.req_pool_indices)
             batch.input_ids = self.draft_token
             device = batch.input_ids.device
-            batch.out_cache_loc = assign_extend_cache_locs_func(
-                req_pool_indices=batch.req_pool_indices,
-                req_to_token=req_to_token_pool.req_to_token,
-                start_offset=batch.seq_lens,
-                end_offset=batch.seq_lens + self.draft_token_num,
-                batch_size=bs,
-                draft_token_num=self.draft_token_num,
-                device=device,
-            )
+            with _nvtx_range("spec_v2.prepare_v2_verify.assign_extend_cache_locs"):
+                batch.out_cache_loc = assign_extend_cache_locs_func(
+                    req_pool_indices=batch.req_pool_indices,
+                    req_to_token=req_to_token_pool.req_to_token,
+                    start_offset=batch.seq_lens,
+                    end_offset=batch.seq_lens + self.draft_token_num,
+                    batch_size=bs,
+                    draft_token_num=self.draft_token_num,
+                    device=device,
+                )
 
             # Set mamba_track_indices for mamba prefix-cache state tracking
             if get_global_server_args().enable_mamba_extra_buffer():
-                batch.mamba_track_indices = torch.stack(
-                    [
-                        req.mamba_ping_pong_track_buffer[req.mamba_next_track_idx]
-                        for req in batch.reqs
-                    ]
-                ).to(torch.int64)
+                with _nvtx_range("spec_v2.prepare_v2_verify.mamba_track_indices"):
+                    batch.mamba_track_indices = torch.stack(
+                        [
+                            req.mamba_ping_pong_track_buffer[req.mamba_next_track_idx]
+                            for req in batch.reqs
+                        ]
+                    ).to(torch.int64)
                 batch.mamba_track_mask = None
                 batch.mamba_track_seqlens = None
 
@@ -250,20 +269,30 @@ class EagleVerifyInputV2Mixin:
             else ForwardMode.TARGET_VERIFY
         )
         batch.capture_hidden_mode = CaptureHiddenMode.FULL
-        verify_forward_batch = ForwardBatch.init_new(batch, target_worker.model_runner)
+        with _nvtx_range("spec_v2.prepare_v2_verify.forward_batch_init_new"):
+            verify_forward_batch = ForwardBatch.init_new(
+                batch, target_worker.model_runner
+            )
 
         # Run attention backend plan and cuda graph preparation
-        can_run_cuda_graph = bool(
-            target_worker.model_runner.graph_runner
-            and target_worker.model_runner.graph_runner.can_run(verify_forward_batch)
-        )
+        with _nvtx_range("spec_v2.prepare_v2_verify.graph_runner.can_run"):
+            can_run_cuda_graph = bool(
+                target_worker.model_runner.graph_runner
+                and target_worker.model_runner.graph_runner.can_run(verify_forward_batch)
+            )
         if can_run_cuda_graph:
-            target_worker.model_runner.graph_runner.replay_prepare(verify_forward_batch)
-        else:
-            if not batch.forward_mode.is_idle():
-                target_worker.model_runner.attn_backend.init_forward_metadata(
+            with _nvtx_range("spec_v2.prepare_v2_verify.graph_runner.replay_prepare"):
+                target_worker.model_runner.graph_runner.replay_prepare(
                     verify_forward_batch
                 )
+        else:
+            if not batch.forward_mode.is_idle():
+                with _nvtx_range(
+                    "spec_v2.prepare_v2_verify.attn_backend.init_forward_metadata"
+                ):
+                    target_worker.model_runner.attn_backend.init_forward_metadata(
+                        verify_forward_batch
+                    )
 
         return verify_forward_batch, can_run_cuda_graph
 
