@@ -696,7 +696,7 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
 
         else:  # target_verify or draft_decode
             seq_positions = batch.spec_info.positions.view(batch_size, -1)
-            # Split text-only and mixed batches here to keep the fast path lean.
+            # Split text-only and mixed batches here because SpecV2 text-only batches can avoid an extra D2H.
             if all(mm_input is None for mm_input in mm_inputs):
                 mrope_delta_tensor = torch.zeros(
                     (batch_size, 1), dtype=torch.int64, device=device
