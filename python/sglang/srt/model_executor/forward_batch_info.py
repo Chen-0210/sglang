@@ -709,25 +709,21 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             if batch.forward_mode.is_draft_extend():  # draft_extend_after_decode
                 mrope_deltas = []
                 extend_lens = []
-                for batch_idx in range(batch_size):
-                    extend_seq_len = batch.extend_seq_lens[batch_idx]
-                    extend_lens.append(extend_seq_len)
-                    mrope_delta = (
-                        torch.zeros(1, dtype=torch.int64)
-                        if mm_inputs[batch_idx] is None
-                        else mm_inputs[batch_idx].mrope_position_delta.squeeze(0)
-                    )
-                    mrope_deltas.append(mrope_delta)
                 with _nvtx_range(
-                    "forward_batch.compute_spec_mrope_positions.draft_extend.mrope_delta_to"
+                    "forward_batch.compute_spec_mrope_positions.draft_extend.mrope_delta_prepare"
                 ):
-                    mrope_delta_tensor = torch.stack(mrope_deltas, dim=0).to(
-                        device=device
-                    )
+                    for batch_idx in range(batch_size):
+                        extend_seq_len = batch.extend_seq_lens[batch_idx]
+                        extend_lens.append(extend_seq_len)
+                        mrope_deltas.append(
+                            self._get_mrope_position_delta_on_device(
+                                mm_inputs[batch_idx], device
+                            )
+                        )
                 position_chunks = torch.split(batch.spec_info.positions, extend_lens)
                 mrope_positions_list = [
                     pos_chunk + delta
-                    for pos_chunk, delta in zip(position_chunks, mrope_delta_tensor)
+                    for pos_chunk, delta in zip(position_chunks, mrope_deltas)
                 ]
                 next_input_positions = (
                     torch.cat(mrope_positions_list, dim=0).unsqueeze(0).repeat(3, 1)
@@ -736,19 +732,13 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             else:  # target_verify or draft_decode
                 seq_positions = batch.spec_info.positions.view(batch_size, -1)
                 mrope_deltas = [
-                    (
-                        torch.tensor([0], dtype=torch.int64)
-                        if mm_inputs[i] is None
-                        else mm_inputs[i].mrope_position_delta.squeeze(0)
-                    )
+                    self._get_mrope_position_delta_on_device(mm_inputs[i], device)
                     for i in range(batch_size)
                 ]
                 with _nvtx_range(
-                    "forward_batch.compute_spec_mrope_positions.verify_decode.mrope_delta_to"
+                    "forward_batch.compute_spec_mrope_positions.verify_decode.mrope_delta_prepare"
                 ):
-                    mrope_delta_tensor = torch.stack(mrope_deltas, dim=0).to(
-                        device=device
-                    )
+                    mrope_delta_tensor = torch.stack(mrope_deltas, dim=0)
                 next_input_positions = (
                     (seq_positions + mrope_delta_tensor)
                     .flatten()
@@ -757,6 +747,20 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
                 )
 
         self.mrope_positions = next_input_positions
+
+    def _get_mrope_position_delta_on_device(
+        self,
+        mm_input: Optional[MultimodalInputs],
+        device: torch.device,
+    ) -> torch.Tensor:
+        if mm_input is None:
+            return torch.zeros(1, dtype=torch.int64, device=device)
+
+        delta = mm_input.mrope_position_delta_device_cache
+        if delta is None or delta.device != device:
+            delta = mm_input.mrope_position_delta.squeeze(0).to(device=device)
+            mm_input.mrope_position_delta_device_cache = delta
+        return delta
 
     def _expand_mrope_from_input(
         self,
