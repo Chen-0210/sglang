@@ -718,9 +718,7 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
                     )
                     for i in range(batch_size)
                 ]
-                mrope_delta_tensor = torch.stack(mrope_deltas, dim=0).to(
-                    device=device
-                )
+                mrope_delta_tensor = torch.stack(mrope_deltas, dim=0).to(device=device)
             next_input_positions = (
                 (seq_positions + mrope_delta_tensor).flatten().unsqueeze(0).repeat(3, 1)
             )
