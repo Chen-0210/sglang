@@ -104,6 +104,7 @@ _is_cpu = is_cpu()
 _is_cpu_amx_available = cpu_has_amx_support()
 _is_hip = is_hip()
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
+_supports_shared_expert_fusion_platform = _use_aiter or _is_cuda
 
 
 def can_fuse_shared_expert(
@@ -111,7 +112,7 @@ def can_fuse_shared_expert(
 ) -> bool:
     """Whether the shared expert may be fused as an extra MoE expert (Qwen3.5 + Aiter).
 
-    Caller must still gate on ``support_shared_expert_fusion`` and ``_use_aiter``.
+    Caller must still gate on ``support_shared_expert_fusion`` and platform support.
     """
     if (
         get_global_server_args().disable_shared_experts_fusion is True
@@ -209,8 +210,9 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
             self.num_shared_experts = 1
 
         self.enable_shared_expert_fusion = False  # default to False
-        if _use_aiter:
-            # enable shared expert fusion when use aiter
+        if _supports_shared_expert_fusion_platform:
+            # Enable shared expert fusion only on platforms whose existing MoE path
+            # already accepts fused shared-expert routing without backend changes.
             self.enable_shared_expert_fusion = (
                 support_shared_expert_fusion and can_fuse_shared_expert(config)
             )

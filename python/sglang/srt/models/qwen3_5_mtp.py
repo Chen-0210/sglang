@@ -87,6 +87,9 @@ class Qwen3_5ForCausalLMMTP(nn.Module):
 
         self.logits_processor = LogitsProcessor(config)
 
+    def _get_num_fused_shared_experts(self):
+        return getattr(self.model, "num_fused_shared_experts", 0)
+
     @classmethod
     def get_model_config_for_expert_location(cls, config):
         text_config = getattr(config, "text_config", config)
@@ -168,12 +171,15 @@ class Qwen3_5ForCausalLMMTP(nn.Module):
 
         # Params for MoE experts (non-fused/fused)
         num_experts = getattr(self.config, "num_experts", None)
+        num_fused_shared_experts = (
+            self._get_num_fused_shared_experts() if num_experts is not None else 0
+        )
         if num_experts is not None:
             expert_params_mapping = FusedMoE.make_expert_params_mapping(
                 ckpt_gate_proj_name="gate_proj",
                 ckpt_down_proj_name="down_proj",
                 ckpt_up_proj_name="up_proj",
-                num_experts=num_experts,
+                num_experts=num_experts + num_fused_shared_experts,
             )
         else:
             expert_params_mapping = []
@@ -240,6 +246,12 @@ class Qwen3_5ForCausalLMMTP(nn.Module):
 
             if ".self_attn." in name:
                 name = name.replace(".self_attn", "")
+
+            if num_fused_shared_experts > 0 and "mlp.shared_expert." in name:
+                name = name.replace(
+                    "mlp.shared_expert.",
+                    f"mlp.experts.{num_experts}.",
+                )
 
             # 1) Process stacked parameters (q_proj/k_proj/v_proj & gate_proj/up_proj)
             for param_name, weight_name, shard_id in stacked_params_mapping:
