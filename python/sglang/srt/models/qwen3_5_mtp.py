@@ -88,7 +88,13 @@ class Qwen3_5ForCausalLMMTP(nn.Module):
         self.logits_processor = LogitsProcessor(config)
 
     def _get_num_fused_shared_experts(self):
-        return getattr(self.model, "num_fused_shared_experts", 0)
+        if not (
+            hasattr(self.model, "layers")
+            and len(self.model.layers) > 0
+            and hasattr(self.model.layers[0].mlp, "num_fused_shared_experts")
+        ):
+            return 0
+        return self.model.layers[0].mlp.num_fused_shared_experts
 
     @classmethod
     def get_model_config_for_expert_location(cls, config):
