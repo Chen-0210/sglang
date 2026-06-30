@@ -194,6 +194,24 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
             enable_mamba_track=self.mamba_track_enabled,
             source=self.buffers,
         )
+        self.input_deepstack_embeds: Optional[torch.Tensor] = None
+        if self.is_multimodal and hasattr(
+            self.model_runner.model, "num_deepstack_embeddings"
+        ):
+            deepstack_slots = getattr(
+                self.model_runner.model, "num_deepstack_embeddings", 0
+            )
+            if deepstack_slots:
+                with torch.device(self.device):
+                    self.input_deepstack_embeds = torch.zeros(
+                        (
+                            self.max_num_tokens,
+                            self.model_runner.model_config.hidden_size
+                            * deepstack_slots,
+                        ),
+                        dtype=self.model_runner.dtype,
+                        device=self.device,
+                    )
 
         self.attention_layers = self.model_runner.attention_layers
         self.moe_layers = self.model_runner.moe_layers
@@ -326,6 +344,13 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
     def _cache_loc_dtype(self):
         return torch.int64 if not is_npu() else torch.int32
 
+    def _deepstack_kwargs(self, num_tokens: int) -> Dict[str, torch.Tensor]:
+        if self.input_deepstack_embeds is None:
+            return {}
+        return {
+            "input_deepstack_embeds": self.input_deepstack_embeds[:num_tokens],
+        }
+
     _aiter_chip_info_cached = False
 
     @classmethod
@@ -388,6 +413,7 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
             forward_batch.global_num_tokens_cpu,
         )
         set_is_extend_in_batch(False)
+        kwargs = self._deepstack_kwargs(num_tokens)
 
         with (
             forward_context(
@@ -408,11 +434,13 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
                     forward_batch.positions,
                     forward_batch,
                     forward_batch.input_embeds,
+                    **kwargs,
                 )
             return self.model_runner.model.forward(
                 forward_batch.input_ids,
                 forward_batch.positions,
                 forward_batch,
+                **kwargs,
             )
 
     def _run_dummy_forward(self, num_tokens: int) -> None:
@@ -866,6 +894,8 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
             static_forward_batch = self.load_batch(forward_batch, **kwargs)
             static_num_tokens = len(static_forward_batch.input_ids)
             raw_num_tokens = self.raw_num_tokens
+            replay_kwargs = dict(kwargs)
+            replay_kwargs.update(self._deepstack_kwargs(static_num_tokens))
 
             if self.layer_model is not None:
                 # BCG path. The captured graph is a bs=1 replay of
@@ -898,7 +928,7 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
                                 1, static_n
                             ).copy_(ie[:static_n])
                     return self.backend.replay(
-                        shape_key, static_forward_batch, **kwargs
+                        shape_key, static_forward_batch, **replay_kwargs
                     )
 
                 original_layer_forward = self.layer_model.forward
@@ -923,7 +953,7 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
                             static_forward_batch.input_ids,
                             static_forward_batch.positions,
                             static_forward_batch,
-                            **kwargs,
+                            **replay_kwargs,
                         )
                 finally:
                     self.layer_model.forward = original_layer_forward
@@ -947,7 +977,7 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
                     ),
                 ):
                     output = self.backend.replay(
-                        self._static_num_tokens, static_forward_batch, **kwargs
+                        self._static_num_tokens, static_forward_batch, **replay_kwargs
                     )
 
             if isinstance(output, LogitsProcessorOutput):

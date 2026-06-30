@@ -794,6 +794,7 @@ def embed_mm_inputs(
     data_embedding_func_mapping: Dict[Modality, DataEmbeddingFunc] = None,
     placeholder_tokens: dict[Modality, List[int]] = None,
     use_deepstack: Dict[Modality, bool] = {},
+    prealloc_deepstack: Optional[torch.Tensor] = None,
 ) -> Optional[torch.Tensor]:
     """
     Embed multimodal inputs and integrate them with text token embeddings.
@@ -895,12 +896,17 @@ def embed_mm_inputs(
         deepstack_embedding_shape = input_embeds.shape[:-1] + (
             input_embeds.shape[-1] * num_deepstack_embeddings,
         )
-        # a zero-filled embedding, with the same length of input_embeds, but different hidden_size
-        input_deepstack_embeds = torch.zeros(
-            deepstack_embedding_shape,
-            device=input_embeds.device,
-            dtype=input_embeds.dtype,
-        )
+        if prealloc_deepstack is not None:
+            assert prealloc_deepstack.shape == deepstack_embedding_shape
+            input_deepstack_embeds = prealloc_deepstack
+            input_deepstack_embeds.zero_()
+        else:
+            # a zero-filled embedding, with the same length of input_embeds, but different hidden_size
+            input_deepstack_embeds = torch.zeros(
+                deepstack_embedding_shape,
+                device=input_embeds.device,
+                dtype=input_embeds.dtype,
+            )
 
         other_info["input_deepstack_embeds"] = input_deepstack_embeds
 
@@ -932,6 +938,7 @@ def _embed_mm_inputs_with_split(
     data_embedding_func_mapping: Dict[Modality, DataEmbeddingFunc] = None,
     placeholder_tokens: dict[Modality, List[int]] = None,
     use_deepstack: Dict[Modality, bool] = {},
+    prealloc_deepstack: Optional[torch.Tensor] = None,
 ):
     """Split batch into precomputed vs non-precomputed, embed each group, merge back."""
     precomputed_req_indices = []
@@ -959,6 +966,7 @@ def _embed_mm_inputs_with_split(
             extend_prefix_lens=extend_prefix_lens,
             extend_seq_lens=extend_seq_lens,
             input_ids=input_ids,
+            prealloc_deepstack=prealloc_deepstack,
             **embed_kwargs,
         )
 
@@ -979,12 +987,20 @@ def _embed_mm_inputs_with_split(
     input_deepstack_embeds = None
     if use_deepstack and multimodal_model is not None:
         num_deepstack_embeddings = len(multimodal_model.deepstack_visual_indexes)
-        input_deepstack_embeds = torch.zeros(
+        deepstack_embedding_shape = (
             input_ids.shape[0],
             input_embedding.embedding_dim * num_deepstack_embeddings,
-            device=input_ids.device,
-            dtype=input_embedding.weight.dtype,
         )
+        if prealloc_deepstack is not None:
+            assert prealloc_deepstack.shape == deepstack_embedding_shape
+            input_deepstack_embeds = prealloc_deepstack
+            input_deepstack_embeds.zero_()
+        else:
+            input_deepstack_embeds = torch.zeros(
+                deepstack_embedding_shape,
+                device=input_ids.device,
+                dtype=input_embedding.weight.dtype,
+            )
         other_info["input_deepstack_embeds"] = input_deepstack_embeds
 
     for group_req_indices in [precomputed_req_indices, non_precomputed_req_indices]:
@@ -1072,6 +1088,7 @@ def general_mm_embed_routine(
                 if forward_batch.mm_inputs[i] is not None
             ]
             server_args = get_global_server_args()
+            prealloc_deepstack = kwargs.get("input_deepstack_embeds", None)
             if server_args and server_args.enable_adaptive_dispatch_to_encoder:
                 # Split by precomputed vs non-precomputed so get_embedding_and_mask only sees uniform batches
                 input_embeds, other_info = _embed_mm_inputs_with_split(
@@ -1085,6 +1102,7 @@ def general_mm_embed_routine(
                     data_embedding_func_mapping=data_embedding_funcs,
                     placeholder_tokens=placeholder_tokens,
                     use_deepstack=use_deepstack,
+                    prealloc_deepstack=prealloc_deepstack,
                 )
             else:
                 input_embeds, other_info = embed_mm_inputs(
@@ -1097,6 +1115,7 @@ def general_mm_embed_routine(
                     data_embedding_func_mapping=data_embedding_funcs,
                     placeholder_tokens=placeholder_tokens,
                     use_deepstack=use_deepstack,
+                    prealloc_deepstack=prealloc_deepstack,
                 )
 
             # add for qwen3_vl deepstack
