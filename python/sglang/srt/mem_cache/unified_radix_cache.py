@@ -1170,7 +1170,9 @@ class UnifiedRadixCache(KVCacheEventMixin, BasePrefixCache):
                         value_slice[dup_start:consumed_from]
                     )
 
-            self._inc_hit_count(node, params.chunked)
+            # Defer the final target until all components have committed.
+            if prefix_len < len(key):
+                self._inc_hit_count(node, params.chunked)
             total_prefix_length += prefix_len
             key = key[prefix_len:]
             value = value[prefix_len:]
@@ -1207,8 +1209,25 @@ class UnifiedRadixCache(KVCacheEventMixin, BasePrefixCache):
                     LRURefreshPhase.INSERT_END, target_node, self.root_node
                 )
 
-        if is_new_leaf:
+        if target_node is not self.root_node:
             self._inc_hit_count(target_node, params.chunked)
+
+        if (
+            self.cache_controller is not None
+            and self.cache_controller.write_policy
+            in ("write_through", "write_through_selective")
+            and target_node.backuped
+        ):
+            component_types = {
+                component.component_type
+                for component in self._components_tuple
+                if component.component_type != BASE_COMPONENT_TYPE
+                and component.needs_incremental_host_backup(
+                    target_node, insert_result=result
+                )
+            }
+            if component_types:
+                self.write_backup(target_node, component_types=component_types)
         return result
 
     def _insert_helper_host(
@@ -1500,6 +1519,26 @@ class UnifiedRadixCache(KVCacheEventMixin, BasePrefixCache):
         All freed device tokens are accumulated into *tracker*.
         """
         assert self._is_device_leaf(node), f"node {node.id} is not a D-leaf"
+
+        # A Full host backup does not imply that auxiliary components added
+        # later are also persisted. Complete them before device demotion.
+        if node.backuped:
+            component_types = {
+                component.component_type
+                for component in self._components_tuple
+                if component.component_type != BASE_COMPONENT_TYPE
+                and component.needs_incremental_host_backup(node)
+            }
+            if component_types:
+                written = self.write_backup(
+                    node,
+                    write_back=True,
+                    component_types=component_types,
+                )
+                if written == 0:
+                    return
+                self.writing_check(write_back=True)
+
         if not node.backuped:
             if (
                 self.cache_controller is not None
@@ -1546,35 +1585,64 @@ class UnifiedRadixCache(KVCacheEventMixin, BasePrefixCache):
 
     # ---- HiCache: Backup / LoadBack ----
 
-    def write_backup(self, node: UnifiedTreeNode, write_back: bool = False) -> int:
-        """Backup a node's data from device to host (D->H)."""
+    def write_backup(
+        self,
+        node: UnifiedTreeNode,
+        write_back: bool = False,
+        component_types: Optional[set[ComponentType]] = None,
+    ) -> int:
+        """Back up a node or selected auxiliary components to host."""
         if self.cache_controller is None:
             return 0
 
+        backup_full = component_types is None or BASE_COMPONENT_TYPE in component_types
+
+        # A node ID can track only one pending D2H operation.
+        if component_types is not None and node.write_through_pending_id is not None:
+            self.writing_check(write_back=True)
+
         # Backup invariant (write-through): parent must be backuped first
-        if not write_back and (
-            node.parent is not self.root_node and not node.parent.backuped
+        if (
+            backup_full
+            and not write_back
+            and (node.parent is not self.root_node and not node.parent.backuped)
         ):
             if self.write_backup(node.parent) <= 0:
                 return 0
 
         device_value = node.component_data[BASE_COMPONENT_TYPE].value
-        kv_xfer = PoolTransfer(name=PoolName.KV, device_indices=device_value)
+        if device_value is None:
+            return 0
+        full_device_value = device_value if backup_full else device_value[:0]
+        kv_xfer = PoolTransfer(name=PoolName.KV, device_indices=full_device_value)
 
         # Build aux transfers, keyed per component.
         comp_xfers: dict[ComponentType, list] = {}
         for comp in self._components_tuple:
             if comp.component_type == BASE_COMPONENT_TYPE:
                 continue
+            if (
+                component_types is not None
+                and comp.component_type not in component_types
+            ):
+                continue
+            component_data = node.component_data[comp.component_type]
+            if component_types is not None and component_data.host_value is not None:
+                continue
             t = comp.build_hicache_transfers(node, CacheTransferPhase.BACKUP_HOST)
             if t:
                 comp_xfers[comp.component_type] = t
+
+        # A pending write may already have completed the requested backup.
+        if not backup_full and not comp_xfers:
+            return 1
+
         sidecar_xfers = self._build_sidecar_transfers(
             CacheTransferPhase.BACKUP_HOST, kv_xfer, comp_xfers
         )
 
         # Pre-evict host if insufficient
-        kv_tokens = len(device_value)
+        kv_tokens = len(full_device_value)
         host_avail = self.cache_controller.mem_pool_host.available_size()
         if host_avail < kv_tokens:
             needed = kv_tokens - host_avail
@@ -1585,18 +1653,19 @@ class UnifiedRadixCache(KVCacheEventMixin, BasePrefixCache):
         aux_xfers = [x for xfers in comp_xfers.values() for x in xfers]
         aux_xfers.extend(sidecar_xfers)
         host_indices = self.cache_controller.write(
-            device_value, node_id=node.id, extra_pools=aux_xfers or None
+            full_device_value, node_id=node.id, extra_pools=aux_xfers or None
         )
         if host_indices is None:
             return 0
 
         # Commit
-        kv_xfer = PoolTransfer(name=PoolName.KV, host_indices=host_indices)
-        self.components[BASE_COMPONENT_TYPE].commit_hicache_transfer(
-            node,
-            CacheTransferPhase.BACKUP_HOST,
-            transfers=[kv_xfer],
-        )
+        if backup_full:
+            kv_xfer = PoolTransfer(name=PoolName.KV, host_indices=host_indices)
+            self.components[BASE_COMPONENT_TYPE].commit_hicache_transfer(
+                node,
+                CacheTransferPhase.BACKUP_HOST,
+                transfers=[kv_xfer],
+            )
         for ct, xfers in comp_xfers.items():
             self.components[ct].commit_hicache_transfer(
                 node,
@@ -1608,7 +1677,7 @@ class UnifiedRadixCache(KVCacheEventMixin, BasePrefixCache):
         if not write_back:
             lock_params = self.inc_lock_ref(node).to_dec_params()
         self._track_write_through_node(node, lock_params)
-        return len(host_indices)
+        return len(host_indices) if backup_full else 1
 
     def _track_write_through_node(
         self,

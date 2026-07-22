@@ -2736,6 +2736,99 @@ class UnifiedRadixCacheSuite:
 
         cache.sanity_check()
 
+    def _prepare_full_only_host_backup(self, write_policy):
+        cache, allocator, req_to_token_pool = build_fixture(self.cfg)
+        self._init_hicache(cache, write_policy=write_policy)
+
+        seq = self._make_seq(1, 2)
+        self._insert(cache, allocator, req_to_token_pool, seq)
+        match = cache.match_prefix(MatchPrefixParams(key=RadixKey(array("q", seq))))
+        node = match.last_device_node
+
+        written = cache.write_backup(
+            node,
+            write_back=True,
+            component_types={ComponentType.FULL},
+        )
+        self.assertGreater(written, 0)
+        cache.writing_check(write_back=True)
+
+        full_host_value = node.component_data[ComponentType.FULL].host_value.clone()
+        cache._evict_component_and_detach_lru(
+            node,
+            cache.components[ComponentType.MAMBA],
+            target=EvictLayer.DEVICE,
+        )
+
+        self.assertTrue(node.backuped)
+        self.assertIsNone(node.component_data[ComponentType.MAMBA].value)
+        self.assertIsNone(node.component_data[ComponentType.MAMBA].host_value)
+        return cache, allocator, req_to_token_pool, seq, node, full_host_value
+
+    def _assert_hicache_mamba_incremental_write_through(self, write_policy):
+        if not self.cfg.has_mamba or self.cfg.has_swa:
+            self.skipTest("requires Full+Mamba")
+
+        (
+            cache,
+            allocator,
+            req_to_token_pool,
+            seq,
+            node,
+            full_host_value,
+        ) = self._prepare_full_only_host_backup(write_policy)
+
+        self._insert(cache, allocator, req_to_token_pool, seq)
+        cache.writing_check(write_back=True)
+
+        self.assertTrue(
+            torch.equal(
+                node.component_data[ComponentType.FULL].host_value,
+                full_host_value,
+            )
+        )
+        self.assertIsNotNone(node.component_data[ComponentType.MAMBA].host_value)
+        self.assertNotIn(
+            "host_backup_dirty",
+            node.component_data[ComponentType.MAMBA].metadata,
+        )
+        self.assertIsNone(node.write_through_pending_id)
+
+    def test_hicache_mamba_incremental_write_through(self):
+        self._assert_hicache_mamba_incremental_write_through("write_through")
+
+    def test_hicache_mamba_incremental_write_through_selective(self):
+        self._assert_hicache_mamba_incremental_write_through("write_through_selective")
+
+    def test_hicache_mamba_incremental_write_back(self):
+        if not self.cfg.has_mamba or self.cfg.has_swa:
+            self.skipTest("requires Full+Mamba")
+
+        (
+            cache,
+            allocator,
+            req_to_token_pool,
+            seq,
+            node,
+            full_host_value,
+        ) = self._prepare_full_only_host_backup("write_back")
+
+        self._insert(cache, allocator, req_to_token_pool, seq)
+        self.assertIsNone(node.component_data[ComponentType.MAMBA].host_value)
+
+        tracker = {ct: 0 for ct in cache.tree_components}
+        cache._evict_device_leaf(node, tracker)
+
+        self.assertTrue(node.evicted)
+        self.assertTrue(
+            torch.equal(
+                node.component_data[ComponentType.FULL].host_value,
+                full_host_value,
+            )
+        )
+        self.assertIsNone(node.component_data[ComponentType.MAMBA].value)
+        self.assertIsNotNone(node.component_data[ComponentType.MAMBA].host_value)
+
     def test_hicache_evict_to_host(self):
         """Evicting a backed-up device leaf demotes it to host-only state."""
         if self._skip_unsupported_hicache_test():

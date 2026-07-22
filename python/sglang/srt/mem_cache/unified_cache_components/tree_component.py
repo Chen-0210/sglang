@@ -380,6 +380,17 @@ class TreeComponent(ABC):
 
     # ---- HiCache Hooks ----
 
+    def needs_incremental_host_backup(
+        self,
+        node: UnifiedTreeNode,
+        insert_result: Optional[InsertResult] = None,
+    ) -> bool:
+        """Whether this component needs an auxiliary-only host backup.
+
+        Components opt in explicitly. The default preserves existing behavior.
+        """
+        return False
+
     def build_hicache_transfers(
         self,
         node: UnifiedTreeNode,

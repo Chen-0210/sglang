@@ -37,6 +37,9 @@ if TYPE_CHECKING:
     )
 
 
+_HOST_BACKUP_DIRTY_KEY = "host_backup_dirty"
+
+
 class MambaComponent(TreeComponent):
     component_type = ComponentType.MAMBA
 
@@ -131,15 +134,20 @@ class MambaComponent(TreeComponent):
         result: InsertResult,
     ) -> None:
         assert params.mamba_value is not None
+        cd = node.component_data[self.component_type]
         if is_new_leaf:
-            node.component_data[self.component_type].value = params.mamba_value
+            cd.value = params.mamba_value
+            if cd.host_value is None:
+                cd.metadata[_HOST_BACKUP_DIRTY_KEY] = True
             self.cache.lru_lists[self.component_type].insert_mru(node)
             self.cache.component_evictable_size_[self.component_type] += len(
                 params.mamba_value
             )
             return
-        if node.component_data[self.component_type].value is None:
-            node.component_data[self.component_type].value = params.mamba_value
+        if cd.value is None:
+            cd.value = params.mamba_value
+            if cd.host_value is None:
+                cd.metadata[_HOST_BACKUP_DIRTY_KEY] = True
             # move from host LRU to device LRU
             host_lru = self.cache.host_lru_lists[self.component_type]
             if host_lru.in_list(node):
@@ -447,6 +455,19 @@ class MambaComponent(TreeComponent):
 
     # ---- HiCache Hooks ----
 
+    def needs_incremental_host_backup(
+        self,
+        node: UnifiedTreeNode,
+        insert_result: Optional[InsertResult] = None,
+    ) -> bool:
+        cd = node.component_data[self.component_type]
+        if cd.value is None or cd.host_value is not None:
+            return False
+
+        # During insert, retry only states produced by L1 insertion. During
+        # eviction, any device-only Mamba state must be persisted first.
+        return insert_result is None or cd.metadata.get(_HOST_BACKUP_DIRTY_KEY, False)
+
     def build_hicache_transfers(
         self,
         node: UnifiedTreeNode,
@@ -554,6 +575,7 @@ class MambaComponent(TreeComponent):
                 cd = node.component_data[ct]
                 if cd.host_value is None:
                     cd.host_value = transfers[0].host_indices.clone()
+                cd.metadata.pop(_HOST_BACKUP_DIRTY_KEY, None)
 
         elif phase == CacheTransferPhase.LOAD_BACK:
             if not transfers:
@@ -596,6 +618,7 @@ class MambaComponent(TreeComponent):
                 return
 
             target_node.component_data[ct].host_value = host_indices.clone()
+            target_node.component_data[ct].metadata.pop(_HOST_BACKUP_DIRTY_KEY, None)
             if target_node.component_data[ct].value is None:
                 host_lru = self.cache.host_lru_lists[ct]
                 if not host_lru.in_list(target_node):
