@@ -2829,6 +2829,58 @@ class UnifiedRadixCacheSuite:
         self.assertIsNone(node.component_data[ComponentType.MAMBA].value)
         self.assertIsNotNone(node.component_data[ComponentType.MAMBA].host_value)
 
+    def test_hicache_shorter_prefix_mamba_incremental_backup(self):
+        """A shorter shared prefix gains Mamba in both L1 and L2 after a split."""
+        if not self.cfg.has_mamba or self.cfg.has_swa:
+            self.skipTest("requires Full+Mamba")
+
+        cache, allocator, req_to_token_pool = build_fixture(self.cfg)
+        self._init_hicache(cache, write_policy="write_through")
+
+        # A four-page request followed by its two-page prefix is the scaled
+        # equivalent of the 8K -> 4K request pattern.
+        short_seq = self._make_seq(1, 2)
+        long_seq = short_seq + self._make_seq(1000, 2)
+        self._insert(cache, allocator, req_to_token_pool, long_seq)
+
+        long_match = cache.match_prefix(
+            MatchPrefixParams(key=RadixKey(array("q", long_seq)))
+        )
+        long_node = long_match.last_device_node
+        written = cache.write_backup(long_node, write_back=True)
+        self.assertGreater(written, 0)
+        cache.writing_check(write_back=True)
+
+        # Matching the shorter request splits the Full node. Mamba remains on
+        # the long suffix, so the new prefix node initially has Full only.
+        cache.match_prefix(MatchPrefixParams(key=RadixKey(array("q", short_seq))))
+        short_node = long_node.parent
+        self.assertIsNot(short_node, cache.root_node)
+        self.assertEqual(list(short_node.key.token_ids), short_seq)
+
+        full_host_value = short_node.component_data[
+            ComponentType.FULL
+        ].host_value.clone()
+        mamba_data = short_node.component_data[ComponentType.MAMBA]
+        self.assertIsNone(mamba_data.value)
+        self.assertIsNone(mamba_data.host_value)
+
+        # The shorter request supplies the missing L1 state; incremental
+        # write-through must add its L2 state without replacing Full's backup.
+        self._insert(cache, allocator, req_to_token_pool, short_seq)
+        cache.writing_check(write_back=True)
+
+        self.assertIsNotNone(mamba_data.value)
+        self.assertIsNotNone(mamba_data.host_value)
+        self.assertTrue(
+            torch.equal(
+                short_node.component_data[ComponentType.FULL].host_value,
+                full_host_value,
+            )
+        )
+        self.assertIsNone(short_node.write_through_pending_id)
+        cache.sanity_check()
+
     def test_hicache_evict_to_host(self):
         """Evicting a backed-up device leaf demotes it to host-only state."""
         if self._skip_unsupported_hicache_test():
