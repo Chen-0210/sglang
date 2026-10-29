@@ -379,38 +379,42 @@ class UnifiedCacheLinkerWrapper:
             ),
         )
 
-    def prefetch(self, req: Req) -> None:
+    def prefetch(self, req: Req, *, key: RadixKey | None = None) -> int:
         """Stage a queued request; publish only after all ranks succeed."""
         if self.load_mode != "prefetch":
-            return
+            return 0
         request = req.cache_request_handle
         for previous in self.prefetches:
             if previous.rid == request.rid and previous != request:
                 self._cancel_prefetch(previous)
         if self.cache.disable or request in self.prefetches:
-            return
-        req.init_next_round_input(self.cache, cow_mamba=False)
+            return 0
+        if key is None:
+            req.init_next_round_input(self.cache, cow_mamba=False)
         if is_virtual_node(req.last_node) or req.positional_embed_overrides is not None:
-            return
+            return 0
         page = self.cache.page_size
-        key = RadixKey(
-            req.full_untruncated_fill_ids,
-            extra_key=req.extra_key,
-            cache_salt=req.cache_salt,
-            is_bigram=self.cache.tree_core.is_eagle,
-            limit=req._compute_max_prefix_len(len(req.full_untruncated_fill_ids)),
-        ).page_aligned(page)
+        if key is None:
+            key = RadixKey(
+                req.full_untruncated_fill_ids,
+                extra_key=req.extra_key,
+                cache_salt=req.cache_salt,
+                is_bigram=self.cache.tree_core.is_eagle,
+                limit=req._compute_max_prefix_len(len(req.full_untruncated_fill_ids)),
+            )
+        key, _ = key.maybe_to_bigram_view(self.cache.tree_core.is_eagle)
+        key = key.page_aligned(page)
         start = req.prefix_len
         last_hash = self.cache.get_last_hash_value(req.last_node)
         if len(key) <= start or (start and last_hash is None):
-            return
+            return 0
         hashes = get_storage_hash_str(key[start:], last_hash, page_size=page)
         lookups = [
             c.build_external_linker_transfer(LinkerTransferPhase.LOOKUP, None, hashes)
             for c in self._components
         ]
         if any(t is None for t in lookups):
-            return
+            return 0
         try:
             # TODO: Run storage lookup asynchronously to avoid blocking scheduling.
             restorable = self.cache_linker.lookup(req.rid, lookups)
@@ -421,7 +425,7 @@ class UnifiedCacheLinkerWrapper:
             restorable, num_pages=len(hashes), device_hit_pages=0
         )
         if not pages:
-            return
+            return 0
         end = start + pages * page
         state = _ExternalCachePrefetch(
             key[:end],
@@ -451,13 +455,17 @@ class UnifiedCacheLinkerWrapper:
         if not accepted.item():
             self._cancel_prefetch(request)
             self.check_prefetch_events()
+            return 0
+        return end - start
 
-    def check_prefetch_progress(self, request: CacheRequestHandle) -> bool:
+    def check_prefetch_progress(
+        self, request: CacheRequestHandle, *, allow_stop: bool = True
+    ) -> bool:
         state = self.prefetches.get(request)
         if state is None or state.discard:
             return True
         policy = self.cache.prefetch_stop_policy
-        if policy == "wait_complete":
+        if not allow_stop or policy == "wait_complete":
             return False
         if policy == "timeout":
             now = time.perf_counter()

@@ -32,6 +32,7 @@ class DecodePrefixMatch:
     last_device_node: Any
     last_host_node: Any = None
     prefetch_registered: bool = False
+    max_prefix_len: Optional[int] = None
 
     @property
     def l1_prefix_len(self) -> int:
@@ -105,6 +106,7 @@ class DecodeHiCachePreallocMixin:
 
         return DecodePrefixMatch(
             prefix_indices=prefix_indices,
+            max_prefix_len=max_prefix_len,
             l2_host_hit_length=l2_host_hit_length,
             l3_storage_hit_length=l3_storage_hit_length,
             last_device_node=result.last_device_node,
@@ -121,6 +123,21 @@ class DecodeHiCachePreallocMixin:
         Clears the L3 span unless the prefetch was taken, so prefill is never
         promised tokens nothing will load.
         """
+        if (
+            prefix_match is not None
+            and self.scheduler.enable_unified_cache_external_linker
+        ):
+            key = _req_radix_key(
+                self.tree_cache,
+                req,
+                req.origin_input_ids,
+                prefix_match.max_prefix_len,
+            )
+            prefix_match.l3_storage_hit_length = self.tree_cache.linker.prefetch(
+                req, key=key
+            )
+            prefix_match.prefetch_registered = prefix_match.l3_storage_hit_length > 0
+            return
         if (
             prefix_match is None
             or prefix_match.l3_storage_hit_length <= 0
@@ -165,7 +182,10 @@ class DecodeHiCachePreallocMixin:
 
     def _hicache_pending_restore_tokens(self) -> int:
         """Total device tokens reserved for pending HiCache L2/L3 load_back."""
-        if not self.scheduler.enable_decode_hicache:
+        if (
+            not self.scheduler.enable_decode_hicache
+            or self.scheduler.enable_unified_cache_external_linker
+        ):
             return 0
         return sum(
             dr.prefix_match.restore_token_count
@@ -217,7 +237,15 @@ class DecodeHiCacheTransferMixin:
 
         # Wait for L3 -> L2 prefetch to drain (skip when no L3 hit).
         if pm.l3_storage_hit_length > 0:
-            if not self.tree_cache.check_prefetch_progress(dr.req.cache_request_handle):
+            if self.scheduler.enable_unified_cache_external_linker:
+                ready = self.tree_cache.linker.check_prefetch_progress(
+                    dr.req.cache_request_handle, allow_stop=False
+                )
+            else:
+                ready = self.tree_cache.check_prefetch_progress(
+                    dr.req.cache_request_handle
+                )
+            if not ready:
                 return False
             self.tree_cache.pop_prefetch_loaded_tokens(dr.req.cache_request_handle)
 
@@ -285,6 +313,17 @@ class DecodeHiCacheTransferMixin:
             if dr.hicache_restore_status == HiCacheRestoreResult.PENDING
         ]
         if not active:
+            return
+
+        if self.scheduler.enable_unified_cache_external_linker:
+            # Prefetch publishes device KV only after every rank finishes the read.
+            for dr in active:
+                if (
+                    dr.prefix_match is None
+                    or not dr.prefix_match.needs_local_restore
+                    or self._try_hicache_queue_load_back(dr)
+                ):
+                    dr.hicache_restore_status = HiCacheRestoreResult.READY
             return
 
         # Poll each local event once; transfer polling synchronizes request readiness.
