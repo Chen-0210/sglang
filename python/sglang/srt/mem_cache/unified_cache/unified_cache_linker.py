@@ -384,13 +384,13 @@ class UnifiedCacheLinkerWrapper:
     def prefetch(
         self,
         req: Req,
-        token_ids: array[int],
+        token_ids: array[int] | None = None,
         *,
         max_prefix_len: int | None = None,
     ) -> int:
-        """Stage an already-matched request; publish after all ranks succeed.
+        """Stage a queued request; publish after all ranks succeed.
 
-        Callers supply the token sequence and optional raw-token prefix limit.
+        Explicit token IDs reuse the caller's match; otherwise prepare prefill.
         """
         if self.load_mode != "prefetch":
             return 0
@@ -400,10 +400,20 @@ class UnifiedCacheLinkerWrapper:
                 self._cancel_prefetch(previous)
         if self.cache.disable or request in self.prefetches:
             return 0
+        if token_ids is None:
+            req.init_next_round_input(self.cache, cow_mamba=False)
+            key = RadixKey(
+                req.full_untruncated_fill_ids,
+                extra_key=req.extra_key,
+                cache_salt=req.cache_salt,
+                is_bigram=self.cache.tree_core.is_eagle,
+                limit=req._compute_max_prefix_len(len(req.full_untruncated_fill_ids)),
+            )
+        else:
+            key = _req_radix_key(self.cache, req, token_ids, max_prefix_len)
         if is_virtual_node(req.last_node) or req.positional_embed_overrides is not None:
             return 0
         page = self.cache.page_size
-        key = _req_radix_key(self.cache, req, token_ids, max_prefix_len)
         key, _ = key.maybe_to_bigram_view(self.cache.tree_core.is_eagle)
         key = key.page_aligned(page)
         start = req.prefix_len
