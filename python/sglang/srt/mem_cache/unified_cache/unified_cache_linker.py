@@ -380,13 +380,7 @@ class UnifiedCacheLinkerWrapper:
             ),
         )
 
-    def prefetch(
-        self,
-        req: Req,
-        token_ids: Sequence[int] | None = None,
-        *,
-        max_prefix_len: int | None = None,
-    ) -> int | None:
+    def prefetch(self, req: Req, token_ids=None, max_prefix_len=None) -> Optional[int]:
         """Stage a queued request; publish after all ranks succeed.
 
         Explicit token IDs reuse the caller's match; otherwise prepare prefill.
