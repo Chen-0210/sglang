@@ -233,15 +233,7 @@ class DecodeHiCacheTransferMixin:
 
         # Wait for L3 -> L2 prefetch to drain (skip when no L3 hit).
         if pm.l3_storage_hit_length > 0:
-            if self.scheduler.enable_unified_cache_external_linker:
-                ready = self.tree_cache.linker.check_prefetch_progress(
-                    dr.req.cache_request_handle, allow_stop=False
-                )
-            else:
-                ready = self.tree_cache.check_prefetch_progress(
-                    dr.req.cache_request_handle
-                )
-            if not ready:
+            if not self.tree_cache.check_prefetch_progress(dr.req.cache_request_handle):
                 return False
             self.tree_cache.pop_prefetch_loaded_tokens(dr.req.cache_request_handle)
 

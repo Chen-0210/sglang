@@ -464,14 +464,12 @@ class UnifiedCacheLinkerWrapper:
             return 0
         return end - start
 
-    def check_prefetch_progress(
-        self, request: CacheRequestHandle, *, allow_stop: bool = True
-    ) -> bool:
+    def check_prefetch_progress(self, request: CacheRequestHandle) -> bool:
         state = self.prefetches.get(request)
         if state is None or state.discard:
             return True
         policy = self.cache.prefetch_stop_policy
-        if not allow_stop or policy == "wait_complete":
+        if policy == "wait_complete":
             return False
         if policy == "timeout":
             now = time.perf_counter()
