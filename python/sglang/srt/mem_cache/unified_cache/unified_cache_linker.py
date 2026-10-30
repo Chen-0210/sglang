@@ -382,11 +382,7 @@ class UnifiedCacheLinkerWrapper:
         )
 
     def prefetch(self, req: Req, max_prefix_len=None) -> Optional[int]:
-        """Stage a queued request; publish after all ranks succeed.
-
-        Decode reuses its existing match; other roles prepare the request here.
-        Return the accepted token count, or None when no prefetch is accepted.
-        """
+        """Stage a queued request; publish only after all ranks succeed."""
         if self.load_mode != "prefetch":
             return
         request = req.cache_request_handle
