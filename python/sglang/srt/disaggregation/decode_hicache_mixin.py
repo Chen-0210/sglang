@@ -130,7 +130,6 @@ class DecodeHiCachePreallocMixin:
             prefix_match.l3_storage_hit_length = (
                 self.tree_cache.linker.prefetch(
                     req,
-                    req.origin_input_ids,
                     max_prefix_len=prefix_match.max_prefix_len,
                 )
                 or 0

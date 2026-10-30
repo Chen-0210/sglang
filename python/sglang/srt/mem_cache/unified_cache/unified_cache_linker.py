@@ -54,6 +54,7 @@ from sglang.srt.mem_cache.unified_cache.components import (
     TreeComponent,
 )
 from sglang.srt.mem_cache.utils import get_storage_hash_str
+from sglang.srt.runtime_context import get_disagg
 from sglang.srt.session.streaming_session import is_virtual_node
 from sglang.srt.utils import get_device_module
 
@@ -380,10 +381,10 @@ class UnifiedCacheLinkerWrapper:
             ),
         )
 
-    def prefetch(self, req: Req, token_ids=None, max_prefix_len=None) -> Optional[int]:
+    def prefetch(self, req: Req, max_prefix_len=None) -> Optional[int]:
         """Stage a queued request; publish after all ranks succeed.
 
-        Explicit token IDs reuse the caller's match; otherwise prepare prefill.
+        Decode reuses its existing match; other roles prepare the request here.
         Return the accepted token count, or None when no prefetch is accepted.
         """
         if self.load_mode != "prefetch":
@@ -394,7 +395,9 @@ class UnifiedCacheLinkerWrapper:
                 self._cancel_prefetch(previous)
         if self.cache.disable or request in self.prefetches:
             return
-        if token_ids is None:
+        if get_disagg().disaggregation_mode == "decode":
+            token_ids = req.origin_input_ids
+        else:
             req.init_next_round_input(self.cache, cow_mamba=False)
             token_ids = req.full_untruncated_fill_ids
             max_prefix_len = req._compute_max_prefix_len(len(token_ids))
