@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 import time
 from abc import ABC, abstractmethod
+from array import array
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
@@ -380,10 +381,16 @@ class UnifiedCacheLinkerWrapper:
             ),
         )
 
-    def prefetch(self, req: Req, *, max_prefix_len: int | None = None) -> int:
+    def prefetch(
+        self,
+        req: Req,
+        token_ids: array[int],
+        *,
+        max_prefix_len: int | None = None,
+    ) -> int:
         """Stage an already-matched request; publish after all ranks succeed.
 
-        Decode passes a prompt-prefix limit; prefill uses its prepared fill IDs.
+        Callers supply the token sequence and optional raw-token prefix limit.
         """
         if self.load_mode != "prefetch":
             return 0
@@ -396,16 +403,7 @@ class UnifiedCacheLinkerWrapper:
         if is_virtual_node(req.last_node) or req.positional_embed_overrides is not None:
             return 0
         page = self.cache.page_size
-        if max_prefix_len is None:
-            key = RadixKey(
-                req.full_untruncated_fill_ids,
-                extra_key=req.extra_key,
-                cache_salt=req.cache_salt,
-                is_bigram=self.cache.tree_core.is_eagle,
-                limit=req._compute_max_prefix_len(len(req.full_untruncated_fill_ids)),
-            )
-        else:
-            key = _req_radix_key(self.cache, req, req.origin_input_ids, max_prefix_len)
+        key = _req_radix_key(self.cache, req, token_ids, max_prefix_len)
         key, _ = key.maybe_to_bigram_view(self.cache.tree_core.is_eagle)
         key = key.page_aligned(page)
         start = req.prefix_len

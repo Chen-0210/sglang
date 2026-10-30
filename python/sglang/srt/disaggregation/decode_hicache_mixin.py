@@ -129,11 +129,8 @@ class DecodeHiCachePreallocMixin:
         ):
             prefix_match.l3_storage_hit_length = self.tree_cache.linker.prefetch(
                 req,
-                max_prefix_len=(
-                    prefix_match.max_prefix_len
-                    if prefix_match.max_prefix_len is not None
-                    else len(req.origin_input_ids)
-                ),
+                req.origin_input_ids,
+                max_prefix_len=prefix_match.max_prefix_len,
             )
             prefix_match.prefetch_registered = prefix_match.l3_storage_hit_length > 0
             return

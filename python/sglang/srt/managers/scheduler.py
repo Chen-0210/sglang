@@ -3407,7 +3407,13 @@ class Scheduler(
             if self.tree_cache.linker.load_mode != "prefetch":
                 return
             req.init_next_round_input(self.tree_cache, cow_mamba=False)
-            return self.tree_cache.linker.prefetch(req)
+            return self.tree_cache.linker.prefetch(
+                req,
+                req.full_untruncated_fill_ids,
+                max_prefix_len=req._compute_max_prefix_len(
+                    len(req.full_untruncated_fill_ids)
+                ),
+            )
         if self.enable_hicache_storage or self.enable_lmcache:
             req.init_next_round_input(self.tree_cache, cow_mamba=False)
             tree_cache = self.tree_cache
