@@ -28,7 +28,6 @@ from __future__ import annotations
 import logging
 import time
 from abc import ABC, abstractmethod
-from array import array
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
@@ -384,7 +383,7 @@ class UnifiedCacheLinkerWrapper:
     def prefetch(
         self,
         req: Req,
-        token_ids: array[int] | None = None,
+        token_ids: Sequence[int] | None = None,
         *,
         max_prefix_len: int | None = None,
     ) -> int | None:
