@@ -306,17 +306,6 @@ class DecodeHiCacheTransferMixin:
         if not active:
             return
 
-        if self.scheduler.enable_unified_cache_external_linker:
-            # Prefetch publishes device KV only after every rank finishes the read.
-            for dr in active:
-                if (
-                    dr.prefix_match is None
-                    or not dr.prefix_match.needs_local_restore
-                    or self._try_hicache_queue_load_back(dr)
-                ):
-                    dr.hicache_restore_status = HiCacheRestoreResult.READY
-            return
-
         # Poll each local event once; transfer polling synchronizes request readiness.
         done = {
             index: self.tree_cache.is_load_back_event_done(index)
@@ -327,8 +316,11 @@ class DecodeHiCacheTransferMixin:
             if done.get(dr.hicache_load_consumer_index, False):
                 dr.hicache_restore_status = HiCacheRestoreResult.READY
 
-        # Phase B: queue new load_back ops if the next slot is free on every rank.
-        if not self.tree_cache.has_free_load_back_slot():
+        # Only host load-back needs a free slot in the copy-event ring.
+        if (
+            not self.scheduler.enable_unified_cache_external_linker
+            and not self.tree_cache.has_free_load_back_slot()
+        ):
             return
         queued = [
             dr
@@ -342,6 +334,12 @@ class DecodeHiCacheTransferMixin:
             )
         ]
         if not queued:
+            return
+
+        if self.scheduler.enable_unified_cache_external_linker:
+            # Prefetch publishes device KV only after every rank finishes the read.
+            for dr in queued:
+                dr.hicache_restore_status = HiCacheRestoreResult.READY
             return
 
         counter = self.tree_cache.cache_controller.layer_done_counter
