@@ -316,7 +316,7 @@ class DecodeHiCacheTransferMixin:
             if done.get(dr.hicache_load_consumer_index, False):
                 dr.hicache_restore_status = HiCacheRestoreResult.READY
 
-        # Only host load-back needs a free slot in the copy-event ring.
+        # Phase B: queue new load_back ops if the next slot is free on every rank.
         if (
             not self.scheduler.enable_unified_cache_external_linker
             and not self.tree_cache.has_free_load_back_slot()
