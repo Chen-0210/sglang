@@ -522,7 +522,10 @@ class Scheduler(
         )
         self.enable_decode_hicache = (
             get_disagg().disaggregation_decode_enable_radix_cache
-            and self.enable_hierarchical_cache
+            and (
+                self.enable_hierarchical_cache
+                or self.enable_unified_cache_external_linker
+            )
         )
         self.max_recv_per_poll = envs.SGLANG_SCHEDULER_MAX_RECV_PER_POLL.get()
         self.max_new_tokens_limit = envs.SGLANG_MAX_NEW_TOKENS_LIMIT.get()
@@ -616,11 +619,6 @@ class Scheduler(
         )
         self.disable_radix_cache = result.disable_radix_cache
         self.tree_cache = result.tree_cache
-        if self.enable_unified_cache_external_linker:
-            self.enable_decode_hicache = (
-                get_disagg().disaggregation_decode_enable_radix_cache
-                and self.tree_cache.linker.load_mode == "prefetch"
-            )
         if self.enable_hierarchical_cache:
             cache_controller = self.tree_cache.cache_controller
             if cache_controller is not None:
