@@ -3404,6 +3404,9 @@ class Scheduler(
 
     def _prefetch_kvcache(self, req: Req, storage_hit_end: Optional[int] = None):
         if self.enable_unified_cache_external_linker:
+            if self.tree_cache.linker.load_mode != "prefetch":
+                return
+            req.init_next_round_input(self.tree_cache, cow_mamba=False)
             return self.tree_cache.linker.prefetch(req)
         if self.enable_hicache_storage or self.enable_lmcache:
             req.init_next_round_input(self.tree_cache, cow_mamba=False)

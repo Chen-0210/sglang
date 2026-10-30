@@ -41,6 +41,7 @@ from sglang.srt.mem_cache.base_prefix_cache import (
     InsertParams,
     MatchResult,
 )
+from sglang.srt.mem_cache.common import _req_radix_key
 from sglang.srt.mem_cache.hicache_storage import (
     PoolName,
     PoolTransfer,
@@ -379,8 +380,11 @@ class UnifiedCacheLinkerWrapper:
             ),
         )
 
-    def prefetch(self, req: Req, *, key: RadixKey | None = None) -> int:
-        """Stage a queued request; publish only after all ranks succeed."""
+    def prefetch(self, req: Req, *, max_prefix_len: int | None = None) -> int:
+        """Stage an already-matched request; publish after all ranks succeed.
+
+        Decode passes a prompt-prefix limit; prefill uses its prepared fill IDs.
+        """
         if self.load_mode != "prefetch":
             return 0
         request = req.cache_request_handle
@@ -389,12 +393,10 @@ class UnifiedCacheLinkerWrapper:
                 self._cancel_prefetch(previous)
         if self.cache.disable or request in self.prefetches:
             return 0
-        if key is None:
-            req.init_next_round_input(self.cache, cow_mamba=False)
         if is_virtual_node(req.last_node) or req.positional_embed_overrides is not None:
             return 0
         page = self.cache.page_size
-        if key is None:
+        if max_prefix_len is None:
             key = RadixKey(
                 req.full_untruncated_fill_ids,
                 extra_key=req.extra_key,
@@ -402,6 +404,8 @@ class UnifiedCacheLinkerWrapper:
                 is_bigram=self.cache.tree_core.is_eagle,
                 limit=req._compute_max_prefix_len(len(req.full_untruncated_fill_ids)),
             )
+        else:
+            key = _req_radix_key(self.cache, req, req.origin_input_ids, max_prefix_len)
         key, _ = key.maybe_to_bigram_view(self.cache.tree_core.is_eagle)
         key = key.page_aligned(page)
         start = req.prefix_len

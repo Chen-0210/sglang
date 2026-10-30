@@ -127,14 +127,13 @@ class DecodeHiCachePreallocMixin:
             prefix_match is not None
             and self.scheduler.enable_unified_cache_external_linker
         ):
-            key = _req_radix_key(
-                self.tree_cache,
-                req,
-                req.origin_input_ids,
-                prefix_match.max_prefix_len,
-            )
             prefix_match.l3_storage_hit_length = self.tree_cache.linker.prefetch(
-                req, key=key
+                req,
+                max_prefix_len=(
+                    prefix_match.max_prefix_len
+                    if prefix_match.max_prefix_len is not None
+                    else len(req.origin_input_ids)
+                ),
             )
             prefix_match.prefetch_registered = prefix_match.l3_storage_hit_length > 0
             return
