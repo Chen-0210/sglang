@@ -402,18 +402,12 @@ class UnifiedCacheLinkerWrapper:
             return 0
         if token_ids is None:
             req.init_next_round_input(self.cache, cow_mamba=False)
-            key = RadixKey(
-                req.full_untruncated_fill_ids,
-                extra_key=req.extra_key,
-                cache_salt=req.cache_salt,
-                is_bigram=self.cache.tree_core.is_eagle,
-                limit=req._compute_max_prefix_len(len(req.full_untruncated_fill_ids)),
-            )
-        else:
-            key = _req_radix_key(self.cache, req, token_ids, max_prefix_len)
+            token_ids = req.full_untruncated_fill_ids
+            max_prefix_len = req._compute_max_prefix_len(len(token_ids))
         if is_virtual_node(req.last_node) or req.positional_embed_overrides is not None:
             return 0
         page = self.cache.page_size
+        key = _req_radix_key(self.cache, req, token_ids, max_prefix_len)
         key, _ = key.maybe_to_bigram_view(self.cache.tree_core.is_eagle)
         key = key.page_aligned(page)
         start = req.prefix_len
