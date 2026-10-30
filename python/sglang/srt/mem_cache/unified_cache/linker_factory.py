@@ -12,7 +12,7 @@ from sglang.srt.mem_cache.unified_cache.linker_config import (
     UnifiedCacheLinkerConfig,
     parse_linker_load_options,
 )
-from sglang.srt.runtime_context import get_memory
+from sglang.srt.runtime_context import get_disagg, get_memory
 
 if TYPE_CHECKING:
     import torch
@@ -69,6 +69,8 @@ def create_unified_cache_linker(
     forward_stream: torch.cuda.Stream | None = None,
 ) -> UnifiedCacheLinker:
     load_mode, prefetch_policy, backend_config = parse_linker_load_options(config)
+    if load_mode == "prefetch" and get_disagg().disaggregation_mode == "decode":
+        prefetch_policy = "wait_complete"
     extra_config = backend_config
     if backend == "dynamic":
         config = UnifiedCacheLinkerConfig.from_dict(

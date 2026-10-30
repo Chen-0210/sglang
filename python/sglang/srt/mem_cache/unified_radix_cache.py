@@ -424,12 +424,7 @@ class UnifiedRadixCache(BasePrefixCache):
         """Attach an external KV store directly to the device pools."""
         if cache_linker.load_mode == "prefetch":
             memory = get_memory()
-            # Decode has promised this prefix to prefill and cannot abandon it.
-            self.prefetch_stop_policy = (
-                "wait_complete"
-                if get_disagg().disaggregation_mode == "decode"
-                else cache_linker.prefetch_policy
-            )
+            self.prefetch_stop_policy = cache_linker.prefetch_policy
             config = memory.unified_cache_external_linker_config
             (
                 _,
