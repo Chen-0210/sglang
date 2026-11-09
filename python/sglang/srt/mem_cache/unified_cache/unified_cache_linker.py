@@ -31,7 +31,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, NamedTuple, Optional
 
 import torch
@@ -188,6 +188,16 @@ class UnifiedCacheLinker(ABC):
         """Read all layers; the future completes after all device writes stop."""
         return None
 
+    def lookup_async(
+        self, rid: str, transfers: list[PoolTransfer]
+    ) -> Future[list[int]]:
+        future = Future()
+        try:
+            future.set_result(self.lookup(rid, transfers))
+        except Exception as error:
+            future.set_exception(error)
+        return future
+
     @abstractmethod
     def lookup(self, rid: str, transfers: list[PoolTransfer]) -> list[int]:
         """Return every prefix length (in pages) that is fully restorable.
@@ -271,6 +281,8 @@ class _ExternalCachePrefetch:
     timeout_s: float = 0.0
     wait_started: float | None = None
     discard: bool = False
+    lookup_future: Future[list[int]] | None = None
+    hashes: list[str] = field(default_factory=list)
 
 
 class _PendingOffload(NamedTuple):
@@ -432,9 +444,31 @@ class UnifiedCacheLinkerWrapper:
         ]
         if any(t is None for t in lookups):
             return
+        state = _ExternalCachePrefetch(
+            key[:],
+            req.last_node,
+            self.cache.inc_lock_ref(req.last_node).to_dec_params(),
+            [],
+            timeout_s=self.cache.prefetch_timeout_base
+            + len(hashes) * self.cache.prefetch_timeout_per_page,
+            hashes=hashes,
+        )
+        self.prefetches[request] = state
         try:
-            # TODO: Run storage lookup asynchronously to avoid blocking scheduling.
-            restorable = self.cache_linker.lookup(req.rid, lookups)
+            state.lookup_future = self.cache_linker.lookup_async(req.rid, lookups)
+        except Exception as error:
+            state.lookup_future = Future()
+            state.lookup_future.set_exception(error)
+        self.check_prefetch_events()
+
+    def _finish_prefetch_lookup(
+        self, request: CacheRequestHandle, state: _ExternalCachePrefetch
+    ) -> None:
+        future = state.lookup_future
+        state.lookup_future = None
+        hashes = state.hashes
+        try:
+            restorable = future.result()
         except Exception:
             logger.warning("External linker prefetch lookup failed", exc_info=True)
             restorable = []
@@ -442,17 +476,11 @@ class UnifiedCacheLinkerWrapper:
             restorable, num_pages=len(hashes), device_hit_pages=0
         )
         if not pages:
+            self._finish_prefetch(request, publish=False)
             return
-        end = start + pages * page
-        state = _ExternalCachePrefetch(
-            key[:end],
-            req.last_node,
-            self.cache.inc_lock_ref(req.last_node).to_dec_params(),
-            [],
-            timeout_s=self.cache.prefetch_timeout_base
-            + len(hashes) * self.cache.prefetch_timeout_per_page,
-        )
-        self.prefetches[request] = state
+        page = self.cache.page_size
+        start = len(state.key) - len(hashes) * page
+        state.key = state.key[: start + pages * page]
         try:
             for component in self._components:
                 transfer = component.build_external_linker_transfer(
@@ -471,7 +499,12 @@ class UnifiedCacheLinkerWrapper:
         self.cache._all_reduce_attn_groups(accepted, torch.distributed.ReduceOp.MIN)
         if not accepted.item():
             self._cancel_prefetch(request)
-            self.check_prefetch_events()
+            done = torch.tensor(
+                [state.future is None or state.future.done()], dtype=torch.int
+            )
+            self.cache._all_reduce_attn_groups(done, torch.distributed.ReduceOp.MIN)
+            if done.item():
+                self._finish_prefetch(request, publish=False)
 
     def check_prefetch_progress(self, request: CacheRequestHandle) -> bool:
         state = self.prefetches.get(request)
@@ -502,8 +535,9 @@ class UnifiedCacheLinkerWrapper:
         state = self.prefetches.get(request)
         if state is not None:
             state.discard = True
-            if state.future is not None:
-                state.future.cancel()
+            for future in (state.lookup_future, state.future):
+                if future is not None:
+                    future.cancel()
 
     def prefetch_size(self, pool: PoolName) -> int:
         """Device slots still owned by prefetch, including discarded writes."""
@@ -520,12 +554,12 @@ class UnifiedCacheLinkerWrapper:
         pending = list(self.prefetches.items())
         progress = []
         for _, state in pending:
-            future = state.future
+            future = state.lookup_future or state.future
             done = future is None or future.done()
             landed = False
             try:
                 if done and future is not None and not future.cancelled():
-                    landed = future.result() is True
+                    landed = state.lookup_future is not None or future.result() is True
             except Exception:
                 logger.warning("External linker prefetch failed", exc_info=True)
             progress.append([done, landed and not state.discard])
@@ -533,9 +567,12 @@ class UnifiedCacheLinkerWrapper:
         # reads. Local cancellation must not change collective participation.
         verdicts = torch.tensor(progress, dtype=torch.int)
         self.cache._all_reduce_attn_groups(verdicts, torch.distributed.ReduceOp.MIN)
-        for (request, _), (done, landed) in zip(pending, verdicts.tolist()):
+        for (request, state), (done, landed) in zip(pending, verdicts.tolist()):
             if done:
-                self._finish_prefetch(request, publish=bool(landed))
+                if state.lookup_future is not None and landed:
+                    self._finish_prefetch_lookup(request, state)
+                else:
+                    self._finish_prefetch(request, publish=bool(landed))
 
     def _finish_prefetch(self, request: CacheRequestHandle, *, publish: bool) -> None:
         state = self.prefetches.pop(request, None)
@@ -544,6 +581,8 @@ class UnifiedCacheLinkerWrapper:
         # Event polling or reset/close has already quiesced every device writer.
         if state.future is not None:
             assert state.future.done()
+        if state.lookup_future is not None:
+            assert state.lookup_future.done()
         end = len(state.key)
         try:
             if not publish:

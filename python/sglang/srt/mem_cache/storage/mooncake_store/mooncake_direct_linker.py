@@ -7,6 +7,7 @@ from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from copy import deepcopy
 from queue import Empty, Queue
+from typing import NamedTuple
 
 import torch
 
@@ -48,6 +49,12 @@ def _storage_suffix(
         parts.append(f"tp{tp_rank}")
     parts.extend((f"cp{attn_cp_rank}", f"pp{pp_rank}"))
     return "_".join(parts)
+
+
+class _LookupTask(NamedTuple):
+    rid: str
+    transfers: list[PoolTransfer]
+    future: Future[list[int]]
 
 
 class MooncakeDirectLinker(UnifiedCacheLinker):
@@ -159,6 +166,7 @@ class MooncakeDirectLinker(UnifiedCacheLinker):
         self.load_queue: Queue[
             tuple[int, dict[str, list[PoolTransfer]], object]
             | tuple[Future[bool], list[PoolTransfer], object]
+            | _LookupTask
             | None
         ] = Queue()
         self.offload_queue: Queue[
@@ -217,6 +225,16 @@ class MooncakeDirectLinker(UnifiedCacheLinker):
                 len(restorable),
             )
         return restorable
+
+    def lookup_async(
+        self, rid: str, transfers: list[PoolTransfer]
+    ) -> Future[list[int]]:
+        future = Future()
+        if self.load_thread.is_alive():
+            self.load_queue.put(_LookupTask(rid, transfers, future))
+        else:
+            future.set_exception(RuntimeError("Mooncake load thread is not running."))
+        return future
 
     def load(self, rid: str, transfers: list[PoolTransfer]) -> bool:
         # Query establishes a boundary at which every component is restorable;
@@ -350,6 +368,15 @@ class MooncakeDirectLinker(UnifiedCacheLinker):
             try:
                 if task is None:
                     return
+                if isinstance(task, _LookupTask):
+                    if task.future.set_running_or_notify_cancel():
+                        try:
+                            task.future.set_result(
+                                self.lookup(task.rid, task.transfers)
+                            )
+                        except BaseException as error:
+                            task.future.set_exception(error)
+                    continue
                 completion, pending, ready = task
                 prefetch = isinstance(completion, Future)
                 if prefetch and not completion.set_running_or_notify_cancel():
