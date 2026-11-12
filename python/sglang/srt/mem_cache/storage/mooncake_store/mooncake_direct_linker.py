@@ -157,6 +157,7 @@ class MooncakeDirectLinker(UnifiedCacheLinker):
             1, int(extra_config.get("linker_load_threads", DEFAULT_LOAD_THREADS))
         )
         self.load_mode = extra_config.pop("load_mode", "layer_wise")
+        self.selective_lease = extra_config.pop("selective_lease", False)
         # TODO: unlike `HiCacheController._generate_storage_config`, this sets no
         # `dp_rank`. Aligning the storage-config producers changes persisted
         # storage keys, so it waits for a storage-key format change.
@@ -181,6 +182,12 @@ class MooncakeDirectLinker(UnifiedCacheLinker):
             self.storage = MooncakeStore(storage_config, mem_pool=None)
         else:
             self.storage = storage
+        if self.selective_lease and not callable(
+            getattr(self.storage.store, "batch_probe_key", None)
+        ):
+            raise ValueError(
+                "selective_lease requires Mooncake batch_probe_key support."
+            )
         self.storage.mem_pool_host = self.pool_group
         self.storage.registered_pools = self.pools
         storage_suffix = _storage_suffix(
@@ -287,7 +294,9 @@ class MooncakeDirectLinker(UnifiedCacheLinker):
         page_keys = list(kv.keys)
         if not page_keys:
             return []
-        result = self.storage.batch_exists_v2(page_keys, expanded)
+        result = self.storage.batch_exists_v2(
+            page_keys, expanded, probe_only=self.selective_lease
+        )
         restorable = result.restorable_prefix_pages or []
         self.stats["lookup"] += 1
         if restorable:
@@ -298,6 +307,22 @@ class MooncakeDirectLinker(UnifiedCacheLinker):
                 len(restorable),
             )
         return restorable
+
+    def _lease_transfers(self, transfers: list[PoolTransfer]) -> bool:
+        """Lease only the objects selected for the actual read."""
+        if not self.selective_lease:
+            return True
+        try:
+            keys = []
+            for transfer in transfers:
+                component_keys, _ = self.storage._get_hybrid_page_component_keys(
+                    list(transfer.keys), transfer
+                )
+                keys.extend(self.storage._tag_keys(component_keys))
+            return not keys or list(self.storage._batch_exist(keys)) == [1] * len(keys)
+        except Exception:
+            logger.warning("Mooncake selective lease failed", exc_info=True)
+            return False
 
     def load(self, rid: str, transfers: list[PoolTransfer]) -> bool:
         # Query establishes a boundary at which every component is restorable;
@@ -310,6 +335,8 @@ class MooncakeDirectLinker(UnifiedCacheLinker):
             return False
         if rid in self.pending_loads:
             raise RuntimeError(f"Mooncake load for rid={rid} is already queued.")
+        if not self._lease_transfers(expanded):
+            return False
         self.pending_loads[rid] = expanded
         return True
 
@@ -319,7 +346,7 @@ class MooncakeDirectLinker(UnifiedCacheLinker):
         expanded = self.pool_group.resolve_transfers(
             transfers, allow_partial=True, allow_missing_kv=True
         )
-        if not expanded:
+        if not expanded or not self._lease_transfers(expanded):
             return None
         self.freeze_gc_once()
         ready = self.record_transfer_ready()
