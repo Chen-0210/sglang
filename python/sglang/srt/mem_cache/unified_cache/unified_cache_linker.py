@@ -166,7 +166,6 @@ class UnifiedCacheLinker(ABC):
     pools: dict[PoolName, object]
     load_mode = "layer_wise"
     prefetch_policy = "timeout"
-    selective_lease = False
     # None when the current stream is the only one using the pages.
     forward_stream: Optional[torch.cuda.Stream] = None
 
@@ -678,14 +677,13 @@ class UnifiedCacheLinkerWrapper:
                 ExternalLinkerLoadPhase.ABORT, req, component_transfers, prefix_len
             )
             raise
-        if self.cache_linker.selective_lease:
-            # Objects may disappear between the probe and the read lease.
-            accepted = torch.tensor([queued], dtype=torch.int)
-            cache._all_reduce_attn_groups(accepted, torch.distributed.ReduceOp.MIN)
-            if not accepted.item():
-                if queued:
-                    self.cache_linker.cancel_queued_load(req.rid)
-                queued = False
+        # Load acceptance may differ across ranks after probing storage.
+        accepted = torch.tensor([queued], dtype=torch.int)
+        cache._all_reduce_attn_groups(accepted, torch.distributed.ReduceOp.MIN)
+        if not accepted.item():
+            if queued:
+                self.cache_linker.cancel_queued_load(req.rid)
+            queued = False
         if not queued:
             self._update_load(
                 ExternalLinkerLoadPhase.ABORT, req, component_transfers, prefix_len
