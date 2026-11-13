@@ -1178,6 +1178,20 @@ class MooncakeStore(HiCacheStorage, MooncakeBaseStore):
         )
         return {k: ed[k] for k in keys if ed.get(k) is not None}
 
+    def lease_transfers(self, transfers: List[PoolTransfer]) -> bool:
+        """Lease only the objects selected for the actual read."""
+        try:
+            keys = []
+            for transfer in transfers:
+                component_keys, _ = self._get_hybrid_page_component_keys(
+                    list(transfer.keys), transfer
+                )
+                keys.extend(self._tag_keys(component_keys))
+            return not keys or list(self._batch_exist(keys)) == [1] * len(keys)
+        except Exception:
+            logger.warning("Mooncake selective lease failed", exc_info=True)
+            return False
+
     def batch_exists_v2(
         self,
         keys: List[str],

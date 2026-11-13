@@ -683,8 +683,6 @@ class UnifiedCacheLinkerWrapper:
         if not accepted.item():
             if queued:
                 self.cache_linker.cancel_queued_load(req.rid)
-            queued = False
-        if not queued:
             self._update_load(
                 ExternalLinkerLoadPhase.ABORT, req, component_transfers, prefix_len
             )

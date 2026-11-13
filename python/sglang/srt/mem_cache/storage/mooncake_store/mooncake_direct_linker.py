@@ -299,20 +299,6 @@ class MooncakeDirectLinker(UnifiedCacheLinker):
             )
         return restorable
 
-    def _lease_transfers(self, transfers: list[PoolTransfer]) -> bool:
-        """Lease only the objects selected for the actual read."""
-        try:
-            keys = []
-            for transfer in transfers:
-                component_keys, _ = self.storage._get_hybrid_page_component_keys(
-                    list(transfer.keys), transfer
-                )
-                keys.extend(self.storage._tag_keys(component_keys))
-            return not keys or list(self.storage._batch_exist(keys)) == [1] * len(keys)
-        except Exception:
-            logger.warning("Mooncake selective lease failed", exc_info=True)
-            return False
-
     def load(self, rid: str, transfers: list[PoolTransfer]) -> bool:
         # Query establishes a boundary at which every component is restorable;
         # insert then removes pages already resident in L1. Loading is therefore
@@ -324,7 +310,7 @@ class MooncakeDirectLinker(UnifiedCacheLinker):
             return False
         if rid in self.pending_loads:
             raise RuntimeError(f"Mooncake load for rid={rid} is already queued.")
-        if not self._lease_transfers(expanded):
+        if not self.storage.lease_transfers(expanded):
             return False
         self.pending_loads[rid] = expanded
         return True
@@ -335,7 +321,7 @@ class MooncakeDirectLinker(UnifiedCacheLinker):
         expanded = self.pool_group.resolve_transfers(
             transfers, allow_partial=True, allow_missing_kv=True
         )
-        if not expanded or not self._lease_transfers(expanded):
+        if not expanded or not self.storage.lease_transfers(expanded):
             return None
         self.freeze_gc_once()
         ready = self.record_transfer_ready()
