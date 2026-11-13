@@ -661,34 +661,34 @@ class UnifiedCacheLinkerWrapper:
                 LinkerTransferPhase.LOAD, None, tail_hashes
             )
             if transfer is None:
-                break
+                self._update_load(
+                    ExternalLinkerLoadPhase.ABORT,
+                    req,
+                    component_transfers,
+                    prefix_len,
+                )
+                return 0, req.last_node
             component_transfers.append((component, transfer))
 
+        full_transfer = component_transfers[0][1]
+        assert full_transfer.name == PoolName.KV
         # Queue before PREPARE touches the request, so a refused load only has
-        # the allocations to undo before falling back to recompute.
-        queued = False
+        # the allocations to undo before falling back to recompute. The result
+        # depends on the transfers alone, so every rank takes the same branch.
         try:
-            if len(component_transfers) == len(self._components):
-                queued = self.cache_linker.load(
-                    req.rid, [transfer for _, transfer in component_transfers]
-                )
+            queued = self.cache_linker.load(
+                req.rid, [transfer for _, transfer in component_transfers]
+            )
         except BaseException:
             self._update_load(
                 ExternalLinkerLoadPhase.ABORT, req, component_transfers, prefix_len
             )
             raise
-        # Load acceptance may differ across ranks after probing storage.
-        accepted = torch.tensor([queued], dtype=torch.int)
-        cache._all_reduce_attn_groups(accepted, torch.distributed.ReduceOp.MIN)
-        if not accepted.item():
-            if queued:
-                self.cache_linker.cancel_queued_load(req.rid)
+        if not queued:
             self._update_load(
                 ExternalLinkerLoadPhase.ABORT, req, component_transfers, prefix_len
             )
             return 0, req.last_node
-        full_transfer = component_transfers[0][1]
-        assert full_transfer.name == PoolName.KV
         self._update_load(
             ExternalLinkerLoadPhase.PREPARE,
             req,

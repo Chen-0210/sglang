@@ -287,7 +287,10 @@ class MooncakeDirectLinker(UnifiedCacheLinker):
         page_keys = list(kv.keys)
         if not page_keys:
             return []
-        result = self.storage.batch_exists_v2(page_keys, expanded, probe_only=True)
+        if self.load_mode == "prefetch":
+            result = self.storage.batch_probe(page_keys, expanded)
+        else:
+            result = self.storage.batch_exists_v2(page_keys, expanded)
         restorable = result.restorable_prefix_pages or []
         self.stats["lookup"] += 1
         if restorable:
@@ -310,8 +313,6 @@ class MooncakeDirectLinker(UnifiedCacheLinker):
             return False
         if rid in self.pending_loads:
             raise RuntimeError(f"Mooncake load for rid={rid} is already queued.")
-        if not self.storage.lease_transfers(expanded):
-            return False
         self.pending_loads[rid] = expanded
         return True
 
@@ -321,7 +322,7 @@ class MooncakeDirectLinker(UnifiedCacheLinker):
         expanded = self.pool_group.resolve_transfers(
             transfers, allow_partial=True, allow_missing_kv=True
         )
-        if not expanded or not self.storage.lease_transfers(expanded):
+        if not expanded:
             return None
         self.freeze_gc_once()
         ready = self.record_transfer_ready()
